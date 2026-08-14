@@ -1,0 +1,149 @@
+"""
+DAFTAR JOB - inilah satu-satunya file yang perlu diedit untuk menambah tabel/ekspor.
+
+INI ADALAH TEMPLATE. Salin file ini menjadi `jobs.py` (sudah masuk .gitignore, tidak
+akan ter-commit) lalu ganti query/nama tabel/struktur S3 key di bawah dengan milikmu
+sendiri. Helper (bronze_daily, bronze_master, sp_job, s3_daily, s3_weekly, s3_master)
+tidak perlu diubah -- itu murni mekanisme, bukan data.
+
+Field Job:
+    name      : nama pendek (untuk --only & log). Harus unik.
+    query     : query sumber. Boleh:
+                  (a) SELECT biasa, atau
+                  (b) EXEC stored procedure (dispatcher SP) yang diakhiri SELECT.
+                Gunakan tanda tanya '?' sebagai placeholder parameter (BUKAN @param).
+    params    : (opsional) nilai untuk tiap '?' di query, sesuai URUTAN.
+    output    : nama file .parquet lokal (otomatis masuk ke OUTPUT_DIR di config.py).
+    overrides : (opsional) paksa tipe Arrow untuk kolom tertentu.
+    labels    : (opsional) kolom target/label untuk dokumentasi dataset ML.
+    s3_key    : (opsional) fungsi (first_row: dict) -> str, S3 key tujuan upload.
+                Pakai helper s3_daily/s3_weekly/s3_master di bawah. None = tidak diupload.
+    needs_date: False untuk data master (tidak tergantung tanggal).
+
+CATATAN layout S3 (Hive-style partitioning):
+  - Pola umum: {layer}/{module}/{dataset}/{partisi}/part-00001.parquet
+        gold/example/daily_metric/recorded_year=2026/recorded_month=07/recorded_day=20/part-00001.parquet
+  - Nama folder berbentuk 'kunci=nilai' membuat Athena/Spark/Glue crawler otomatis
+    mengenali recorded_year/recorded_month/recorded_day sebagai KOLOM PARTISI.
+  - Nama file selalu konstan (part-00001.parquet) karena satu job = satu file penuh
+    per tanggal (bukan delta) -- re-run/backfill tanggal yang sama akan MENIMPA
+    partisi yang sama, bukan menumpuk duplikat (idempoten).
+  - Master/dimensi dipisah lewat prefix 'master_' dan partisi snapshot_date=YYYY-MM-DD
+    (1 level saja, cukup untuk tabel kecil yang dibaca "ambil snapshot terbaru").
+"""
+
+from __future__ import annotations
+
+from datetime import datetime as _datetime, timedelta as _timedelta
+
+import pyarrow as pa
+from job import Job
+
+# Nama SP dispatcher -- ganti dengan stored procedure sesungguhnya di lingkunganmu.
+SP = "dbo.MyDispatcher_SP"
+
+# Tanggal default kalau exporter.py dijalankan tanpa --date/--start-date/--end-date.
+TARGET_DATE = (_datetime.now() - _timedelta(days=1)).strftime("%Y-%m-%d")
+
+# --- Konvensi layout S3 -----------------------------------------------------
+LAYER = "gold"
+S3_PREFIX = "datalake"
+PART_FILE = "part-00001.parquet"
+
+
+def build_jobs(target_date: str) -> list[Job]:
+    """Bangun daftar JOBS untuk satu tanggal proses tertentu (format 'YYYY-MM-DD')."""
+    dt = _datetime.strptime(target_date, "%Y-%m-%d")
+
+    # --- Helper S3 key (di-scope ke target_date lewat closure) ---------------
+
+    def _key(*parts: str) -> str:
+        """Rangkai S3 key: buang segmen kosong dan garis miring dobel."""
+        return "/".join(p.strip("/") for p in parts if p)
+
+    def s3_daily(dataset: str, module: str | None = None, layer: str = LAYER, file_name: str = PART_FILE):
+        """Transaksional harian: {layer}/{module}/{dataset}/recorded_year=/recorded_month=/recorded_day=/{file_name}"""
+        key = _key(S3_PREFIX, layer, f"{module}" if module else None, f"{dataset}",
+                   f"recorded_year={dt:%Y}", f"recorded_month={dt:%m}", f"recorded_day={dt:%d}",
+                   file_name)
+        return lambda _first_row: key
+
+    def s3_weekly(dataset: str, module: str | None = None, layer: str = LAYER, file_name: str = PART_FILE):
+        """Transaksional mingguan: nilai minggu diambil dari kolom week_year/week_month/week_of_month baris pertama."""
+        def build(first_row):
+            y = first_row["week_year"]
+            m = first_row["week_month"]
+            w = first_row["week_of_month"]
+            return _key(S3_PREFIX, layer, f"{module}" if module else None, f"{dataset}",
+                        f"recorded_year={y}", f"recorded_month={m:02d}", f"recorded_week=W{w}",
+                        file_name)
+        return build
+
+    def s3_master(dataset: str, module: str | None = None, layer: str = LAYER, file_name: str = PART_FILE):
+        """Master/dimensi -- snapshot penuh per tanggal proses: {layer}/{module}/master_{dataset}/snapshot_date=/{file_name}"""
+        key = _key(S3_PREFIX, layer, f"{module}" if module else None, f"master_{dataset}",
+                   f"snapshot_date={target_date}", file_name)
+        return lambda _first_row: key
+
+    def sp_job(name, function, output, needs_date=True, overrides=None, labels=None, s3_key=None):
+        """Buat Job yang memanggil SP dispatcher dengan @function (+ @TargetDate)."""
+        if needs_date:
+            query = f"SET NOCOUNT ON; EXEC {SP} @function = ?, @TargetDate = ?;"
+            params = [function, target_date]
+        else:
+            query = f"SET NOCOUNT ON; EXEC {SP} @function = ?;"
+            params = [function]
+        return Job(name=name, query=query, params=params, output=output,
+                   overrides=overrides or {}, labels=labels or [], s3_key=s3_key,
+                   needs_date=needs_date)
+
+    # --- Helper Job bronze (raw copy tabel sumber, TANPA lewat dispatcher SP) -----------
+
+    def bronze_daily(name, table, date_col, dataset, module=None, db="my_database", output=None):
+        """Bronze harian: SELECT * mentah dari satu tabel sumber, difilter satu hari lewat date_col."""
+        output = output or f"{name}.parquet"
+        query = f"""
+            SET NOCOUNT ON;
+            SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)
+            WHERE {date_col} >= CAST(? AS DATE) AND {date_col} < DATEADD(DAY, 1, CAST(? AS DATE))
+        """
+        return Job(name=name, query=query, params=[target_date, target_date], output=output,
+                   s3_key=s3_daily(dataset, module=module, layer="bronze", file_name=output),
+                   needs_date=True)
+
+    def bronze_master(name, table, dataset, module=None, db="my_database", output=None):
+        """Bronze master/lookup: snapshot penuh tiap run, tanpa filter tanggal."""
+        output = output or f"{name}.parquet"
+        query = f"SET NOCOUNT ON; SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)"
+        return Job(name=name, query=query, output=output,
+                   s3_key=s3_master(dataset, module=module, layer="bronze", file_name=output),
+                   needs_date=False)
+
+    return [
+        # --- Contoh: raw copy tabel transaksi harian ---
+        bronze_daily("bronze_example_transaction", "T_Example_Transaction", "createDate",
+                     "example_transaction", module="example"),
+
+        # --- Contoh: tabel master/lookup, snapshot penuh tiap run ---
+        bronze_master("bronze_example_master", "T_Example_Master", "example_master",
+                       module="example"),
+
+        # --- Contoh: job harian lewat SP dispatcher (butuh @TargetDate) ---
+        sp_job("example_daily", function=1, output="gold_example_daily.parquet",
+               s3_key=s3_daily("example_daily")),
+
+        # --- Contoh: job master lewat SP dispatcher (TIDAK butuh @TargetDate) ---
+        sp_job("example_master", function=2, output="gold_example_master.parquet",
+               needs_date=False, s3_key=s3_master("example_master")),
+
+        # --- Contoh SELECT biasa (tanpa SP) ---
+        # Job(
+        #     name="raw_select",
+        #     query="SELECT col_a, col_b FROM dbo.my_table WITH (NOLOCK)",
+        #     output="raw_select.parquet",
+        # ),
+    ]
+
+
+# Dipakai kalau exporter.py di-import/dijalankan tanpa opsi tanggal sama sekali (mis. --list).
+JOBS: list[Job] = build_jobs(TARGET_DATE)

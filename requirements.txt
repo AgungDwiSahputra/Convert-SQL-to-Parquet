@@ -1,0 +1,4 @@
+pyodbc
+pyarrow
+python-dotenv
+boto3

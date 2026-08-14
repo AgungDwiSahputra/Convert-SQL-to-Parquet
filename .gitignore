@@ -1,0 +1,7 @@
+.env
+__pycache__/
+output/
+docs/
+
+# Gunakan jobs.py.example sbg template
+jobs.py
