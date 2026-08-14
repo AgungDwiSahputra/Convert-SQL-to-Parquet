@@ -1,4 +1,4 @@
-# Panduan AI — Pipeline SQL Server → Parquet → S3
+# SQL Server → Parquet → S3
 
 Dokumen ini menjelaskan cara kerja `exporter.py` beserta file pendukungnya. Tujuannya:
 AI yang membaca file ini bisa langsung paham alur, batasan, dan aturan modifikasi
@@ -215,36 +215,6 @@ Kalau `module=None` (default), segmen `source=` dilewati begitu saja — hasilny
 `{layer}/dataset={dataset}/...`. Ini dipakai untuk job yang belum dipetakan ke modul
 manapun (lihat tabel pemetaan di bawah).
 
-⚠️ **Implikasi Glue penting (keputusan disengaja, bukan default aman):** karena
-`source=`/`dataset=` berbentuk key=value, Glue Crawler yang di-run dari root
-`{layer}/` akan membacanya sebagai **kolom partisi satu tabel bersama**, bukan
-sekadar penamaan folder. Ini valid HANYA kalau crawl dilakukan **per folder
-dataset** (satu tabel per kombinasi source+dataset), bukan crawl langsung dari
-root layer — karena skema kolom antar dataset berbeda total (mis. `hk_transactions`
-vs `wm_transactions` datang dari tabel SQL Server yang sama sekali berbeda).
-Kalau nanti mau benar-benar satu tabel gabungan per layer, skema semua dataset
-di layer itu harus diseragamkan dulu (union schema) — belum dilakukan di sini.
-
-| Helper | Dipakai untuk | Pola |
-|---|---|---|
-| `s3_daily()` `jobs.py:123` | Transaksional harian | `{layer}/source={module}/dataset={dataset}/recorded_year=YYYY/recorded_month=MM/recorded_day=DD/{file_name}` |
-| `s3_weekly()` `jobs.py:141` | TMAT (granular mingguan) | `{layer}/source={module}/dataset={dataset}/recorded_year=YYYY/recorded_month=MM/recorded_week=W{n}/{file_name}` |
-| `s3_master()` `jobs.py:159` | Master / dimensi | `{layer}/source={module}/dataset=master_{dataset}/snapshot_date=YYYY-MM-DD/{file_name}` |
-
-Ketiga helper menerima parameter `module` (default `None`, ditulis sebagai `source=`)
-dan `file_name` (default `PART_FILE`) selain `dataset`/`layer` yang sudah ada sejak awal.
-
-Pemetaan modul saat ini (evidence-based dari penamaan job yang sudah ada, bukan tebakan):
-
-| Modul | Job yang dipetakan | Dasar pemetaan |
-|---|---|---|
-| `ARS` | `ars` (dataset `transactions`), `bronze_ars_hk` (`hk_transaction`), `bronze_ars_wm` (`wm_transaction`) | Nama SP `sp_ETL_LoadSilver_ARS_Transactions` + nama job `ars` |
-| `PZO` | `tmat`, `tmat_pz`, `bronze_tmat_pz` | Job lama sudah bernama `tmat_**pz**` |
-| `WLR` | `tmas`, `tmas_wlr`, `bronze_tmas_wlr` | Job lama sudah bernama `tmas_**wlr**` |
-| `HMS` | *(belum ada job aktif — job `hms_tpanen` pernah ada, dihapus)* | Diagram: fitur `panen`/`kirim`/`timbangan` |
-| `MCS` | *(belum ada job)* | Belum dikonfirmasi isinya |
-| *(tanpa modul)* | `awl`, `rs`, `wm`, `dev`, `estate`/`bronze_estate`, `block`/`bronze_block`, `awm`/`bronze_awm`, `ombro`/`bronze_ombro` | Belum ada instruksi modul mana yang cocok — tetap flat `{layer}/{dataset}/...` sampai dikonfirmasi |
-
 Lima keputusan desain yang **jangan diubah tanpa alasan kuat**:
 
 1. **Format `kunci=nilai` pada nama folder.** Inilah yang membuat Athena/Spark/Glue
@@ -327,70 +297,3 @@ python exporter.py --date 2026-07-20 --skip-s3 -b 20000
 8. Kalau menambah field ke `Job`, beri **default** di `job.py` agar job lama tidak rusak.
 
 ---
-
-## 8. Perilaku yang mudah salah paham
-
-| Perilaku | Penjelasan |
-|---|---|
-| **Query 0 baris → file lokal tetap dibuat** | `ParquetWriter` dibuat sebelum fetch pertama (`exporter.py:199`), jadi hasilnya file parquet valid berisi 0 baris. Upload S3 **dilewati** (`total > 0`), sehingga partisi S3 tidak terbentuk. File lokal ada, S3 tidak — ini normal, bukan bug |
-| **Resultset tanpa kolom → tidak ada file sama sekali** | Beda dari kasus di atas: `run_job` `return 0` lebih awal (`:190`) sebelum writer dibuat |
-| **`s3_weekly` memakai baris pertama saja** | Kalau satu hasil query berisi lebih dari satu minggu, **seluruh** data masuk ke partisi minggu milik baris pertama. Aman selama SP mengembalikan tepat satu minggu per pemanggilan |
-| **Master di mode range → `snapshot_date` = tanggal awal range** | Karena job master hanya jalan sekali untuk seluruh range |
-| **`--skip-local` bisa diabaikan** | Kalau job tidak punya tujuan S3, file tetap ditulis lokal dan muncul warning (`:173-175`) |
-| **`--list` tidak terpengaruh `--date`** | Memakai konstanta `JOBS` yang dibangun dari `TARGET_DATE` |
-| **Nama/pola salah di `--only` hanya warning** | Error hanya kalau tidak ada satu pun nama/pola yang cocok. `--only` mendukung wildcard (`*`, `?`) lewat `job_matches()` — pola yang salah ketik (mis. `bronze_hsm_*`, typo) tidak akan cocok apa pun tapi cuma memicu warning, bukan error, kalau pola lain di daftar tetap cocok |
-| **Timestamp tanpa timezone** | `timestamp("us")` naive, diasumsikan WIB. Tidak ada konversi ke UTC — konsumen hilir harus tahu ini. **Kecuali** `_ingested_at` — itu satu-satunya kolom yang tz-aware UTC, sengaja beda karena itu metadata pipeline bukan data sumber |
-| **`_ingested_at` = load terakhir, bukan histori** | Re-run job yang sama untuk partisi yang sama menimpa `_ingested_at` lama dengan yang baru (konsisten dengan overwrite-per-partition). Kalau butuh riwayat semua percobaan, itu belum ada — perlu run-log terpisah |
-| **Exit code `2`** | Berarti sebagian job gagal, bukan error fatal. `1` = error argumen/koneksi |
-| **Satu koneksi untuk seluruh run** | Run rentang panjang menahan satu koneksi SQL Server cukup lama |
-
----
-
-## 9. Verifikasi tanpa koneksi database
-
-`jobs.py` tidak mengimpor `config.py`, jadi seluruh S3 key bisa diperiksa tanpa
-menyentuh SQL Server maupun AWS. Berguna setelah mengubah helper S3:
-
-```python
-from jobs import build_jobs
-
-dummy = {"week_year": 2026, "week_month": 7, "week_of_month": 1}   # untuk job weekly
-seen = {}
-for j in build_jobs("2026-07-20"):
-    key = j.s3_key(dummy) if j.s3_key else "(tidak diupload)"
-    print(f"{j.name:<16} {key}")
-    if j.s3_key:
-        seen.setdefault(key, []).append(j.name)
-
-print("bertabrakan:", {k: v for k, v in seen.items() if len(v) > 1} or "tidak ada")
-```
-
-Selalu jalankan pemeriksaan tabrakan ini setelah menambah job atau mengubah helper —
-tabrakan S3 key tidak memunculkan error apa pun saat runtime, datanya hanya hilang
-tertimpa.
-
----
-
-## 10. Catatan status & keputusan terbuka
-
-- **Dispatcher `dbo.AI_WM_Assistant`** — `@function` 1, 2, 4, 5, 6, 13 membutuhkan
-  `@TargetDate`; `@function` 3, 7–12 tidak meneruskan tanggal ke SELECT akhir sehingga
-  cukup dikirim `@function` saja (`needs_date=False`).
-- **Job `bronze_*` menduplikasi job master `gold`.** `bronze_estate`/`estate` (function 7),
-  `bronze_block`/`block` (8), `bronze_tmat_pz`/`tmat_pz` (9), `bronze_tmas_wlr`/`tmas_wlr` (10),
-  `bronze_awm`/`awm` (11), `bronze_ombro`/`ombro` (12) memanggil `@function` yang **sama
-  persis**. Akibatnya SP dieksekusi dua kali dan isi `bronze/` identik dengan `gold/`.
-  Layer bronze idealnya berisi data **mentah sebelum transformasi**, yang berarti perlu
-  `@function` berbeda atau SELECT langsung ke tabel sumber. Perlu keputusan.
-- **Komentar `TODO konfirmasi` di `jobs.py:174-178` sudah kedaluwarsa** — mengacu pada
-  `function=13` dan tabrakan output yang sudah tidak ada lagi.
-- **File lokal di `output/` masih rata (flat)**, tidak mengikuti struktur partisi S3.
-  Diatur `resolve_output()` (`exporter.py:127`).
-- **Path S3 lama** (`parquet_format/transaksional/…`, `parquet_format/master/…`) beserta
-  konvensi nama proses C# existing sudah **ditinggalkan**. Objek lama tidak terhapus
-  sendiri; perlu backfill atau pemberitahuan ke konsumen hilir.
-- **`import pyarrow as pa` di `jobs.py:86` saat ini tidak terpakai** — disiapkan untuk
-  `overrides`, yang belum dipakai job mana pun.
-- **`schema.yml` belum ada dan sifatnya opsional.** Schema sudah tertanam di footer file
-  parquet, jadi konsumen tidak membutuhkannya. Baru relevan kalau nanti dibutuhkan
-  deteksi schema drift, kontrak antar-tim, atau generator DDL Glue/Athena.
