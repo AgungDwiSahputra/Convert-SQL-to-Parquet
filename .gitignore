@@ -2,6 +2,7 @@
 __pycache__/
 output/
 docs/
+logs/
 
 # Gunakan jobs.py.example sbg template
 jobs.py

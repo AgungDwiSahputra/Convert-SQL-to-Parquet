@@ -111,12 +111,23 @@ def build_schema(cursor, overrides: dict) -> pa.Schema:
 # LOGIKA EKSPOR
 # ---------------------------------------------------------------------------
 
+# Log ke console DAN ke file sekaligus (dua handler) -- supaya wrapper .bat/scheduler
+# tidak perlu redirect/tee manual (redirect 2>&1 native exe di dalam PowerShell 5.1
+# malah membungkus tiap baris stderr jadi NativeCommandError, walau exit code 0).
+# Nama file pakai strftime Python (BUKAN %date%/%time% batch) supaya konsisten
+# lintas locale Windows -- %date% format-nya berubah tergantung Regional Settings.
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, datetime.now().strftime("exporter_%Y%m%d_%H%M%S.log"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(), logging.FileHandler(_LOG_FILE, encoding="utf-8")],
 )
 log = logging.getLogger("parquet-export")
+log.info("Log run ini disimpan ke: %s", _LOG_FILE)
 
 
 def rows_to_table(rows: list, schema: pa.Schema, ingested_at: datetime | None = None) -> pa.Table:
