@@ -6,3 +6,5 @@ logs/
 
 # Gunakan jobs.py.example sbg template
 jobs.py
+
+daftar_tabel_sumber.csv
