@@ -47,7 +47,8 @@ LoadParquetProcess/
 ├── pipeline/            KODE INTI (library, tidak dijalankan langsung)
 ├── webapp/              API FastAPI (Web UI)
 ├── frontend/            React + Tailwind (build -> frontend/dist)
-├── scripts/             helper .bat (find_python.bat)
+├── scripts/             helper: find_python.bat, check_runtime.py, check_network.py
+├── Dockerfile.windows, .dockerignore   image Windows container (bagian 11)
 ├── jobs.db, .env, jobs.py      milik environment, gitignored
 └── output/, logs/, backups/    hasil run, gitignored
 ```
@@ -437,6 +438,9 @@ Pengembangan frontend: `python -m uvicorn webapp.main:app --reload` + `cd fronte
 
 ### Deploy ke server (Windows)
 
+Langkah di bawah untuk menjalankan langsung di Windows (tanpa Docker). **Server Docker produksi: pakai
+Windows container — bagian 11.**
+
 1. Server butuh akses jaringan ke SQL Server, S3, dan SSO portal; ODBC Driver 17 terpasang.
 2. `.env`: kredensial seperti biasa + `SSO_BASE_URL`; `COOKIE_SECURE=true` kalau diakses lewat HTTPS.
 3. `python migrate_jobs.py` (buat `jobs.db` di server) → `python manage.py add-user ... --role admin`.
@@ -570,3 +574,95 @@ klien untuk batas percobaan login tetap benar.
 
 **Monitoring**: `GET /api/health` (tanpa login) → `{"ok": true, "worker_online": true}`; HTTP 503
 kalau database tidak bisa dibuka. `worker_online: false` = worker mati → run & jadwal tertahan.
+
+## 11. Deploy dengan Docker (Windows container)
+
+Target: server Docker produksi — **Windows Server 2016, Windows container, process isolation** (cek:
+`docker info --format "{{.OSType}}"` → `windows`). Satu image (`Dockerfile.windows`) dipakai **dua
+container**: `parquet-exporter-web` (FastAPI + frontend) dan `parquet-exporter-worker`
+(`python worker.py`). Keduanya me-mount **folder data yang sama** ke `C:\data` (`jobs.db`, `logs\`,
+`output\`, `backups\` — path-nya sudah di-set lewat `ENV` di image). Jangan digabung ke container
+aplikasi lain: deploy, dependensi, dan restart-nya jadi saling terikat.
+
+Isi image (detail & alasan di komentar `Dockerfile.windows`):
+- Base `mcr.microsoft.com/windows/servercore:ltsc2016` — wajib sama dengan build host (process isolation).
+- Tahap 1 build frontend dengan Node (`npm ci` + `npm run build`); tahap 2 Python dari installer
+  python.org, Visual C++ Redistributable, ODBC Driver 17, `pip install -r requirements.txt` (versi
+  dikunci), lalu `scripts/check_runtime.py` — build GAGAL kalau pyarrow / ODBC Driver tidak siap.
+- `.env`, `jobs.py`, `jobs.db`, `logs/`, `output/`, `backups/` tidak masuk image (`.dockerignore`).
+  Kredensial diberikan saat container dijalankan (`--env-file`).
+
+### Deploy pertama
+
+Contoh folder di server: kode di `D:\APLIKASI\parquet-exporter`, data di `D:\APLIKASI\parquet-exporter-data`
+(di LUAR folder kode, supaya update kode tidak menyentuh data). Port host `8084` (8000/8082/8083
+sudah dipakai container lain di server itu).
+
+1. **Kode** ke `D:\APLIKASI\parquet-exporter` (git clone/pull, atau salin folder tanpa `.env`/`jobs.db`/`logs`).
+2. **`.env` server** di `D:\APLIKASI\parquet-exporter\.env` (salin dari `.env.example`). Aturan
+   `--env-file`: tanpa tanda kutip, tanpa komentar di belakang nilai. **Jangan** isi `JOBS_DB`,
+   `LOG_DIR`, `RUN_LOG_DIR`, `OUTPUT_DIR`, `BACKUP_DIR` (sudah diarahkan ke `C:\data` oleh image) —
+   kalau diisi path host (`D:\...`), container mencari file yang tidak ada. Isi
+   `APP_BASE_URL=http://<server>:8084`.
+3. **Data awal** — pindahkan `jobs.db` lama supaya user, job hasil edit UI, kunci S3, dan riwayat run
+   ikut. Di mesin lama, hentikan web & worker, lalu buat salinan yang konsisten (API backup SQLite,
+   ikut menyertakan isi file `-wal`; menyalin `jobs.db` saja bisa kehilangan data terbaru):
+   ```powershell
+   python -c "import sqlite3; s = sqlite3.connect('jobs.db'); d = sqlite3.connect('jobs_pindah.db'); s.backup(d); d.close(); s.close()"
+   ```
+   Salin `jobs_pindah.db` ke `D:\APLIKASI\parquet-exporter-data\jobs.db`. (Environment baru tanpa
+   data lama: `docker run` sekali dengan `python migrate_jobs.py` + `jobs.py` — lihat bagian 2.)
+4. **Build image** (dari `D:\APLIKASI\parquet-exporter`):
+   ```powershell
+   docker build -f Dockerfile.windows -t parquet-exporter .
+   ```
+5. **Cek jaringan dari dalam container** (DNS + TCP ke SQL Server, SSO, SMTP, S3; tanpa login):
+   ```powershell
+   docker run --rm --env-file .env parquet-exporter python scripts\check_network.py
+   ```
+   DNS internal di jaringan NAT container server ini bisa gagal (terbukti untuk portal SSO di image lain;
+   `--add-host` tidak berlaku di Windows container). Untuk tiap nama yang gagal, ambil IP-nya dari
+   **host server Docker** (`Resolve-DnsName <nama>` di server, bukan dari PC lain — hasilnya bisa beda), lalu
+   build ulang (cepat, hanya lapisan terakhir yang diulang) dan cek lagi:
+   ```powershell
+   docker build -f Dockerfile.windows -t parquet-exporter --build-arg HOSTS_ENTRIES="<ip> <nama>;<ip> <nama>" .
+   ```
+   IP sengaja tidak ditulis di file mana pun yang masuk Git. Simpan perintah build-nya di catatan server.
+6. **Jalankan** web & worker (worker **satu instance saja**):
+   ```powershell
+   $data = "D:\APLIKASI\parquet-exporter-data"
+   docker run -d --name parquet-exporter-web --restart unless-stopped --env-file .env -v "${data}:C:\data" -p 8084:8000 parquet-exporter
+   docker run -d --name parquet-exporter-worker --restart unless-stopped --env-file .env -v "${data}:C:\data" parquet-exporter python worker.py
+   ```
+7. **Verifikasi**:
+   - `docker logs parquet-exporter-worker` → `Worker ... siap`; `docker logs parquet-exporter-web` → `Uvicorn running`.
+   - Dari PC lain: `http://<server>:8084/api/health` → `{"ok": true, "worker_online": true}` — sekaligus
+     bukti kedua container berbagi `jobs.db` (heartbeat ditulis worker, dibaca web). Di Windows Server
+     2016, port container biasanya tidak bisa dibuka lewat `localhost` dari server itu sendiri — uji
+     dari PC lain.
+   - Jalankan satu run uji dari UI dengan toggle **Upload ke S3 dimatikan** (`skip_s3`), cek status & log-nya.
+   - Buka port `8084` di Windows Firewall / Security Group kalau diakses dari jaringan lain.
+8. **Ekspor dobel**: kalau `run_exporter.bat` masih terjadwal di Task Scheduler mesin lain, matikan
+   dulu sebelum mengaktifkan jadwal di aplikasi untuk job yang sama (bagian 10).
+
+### Update versi
+
+```powershell
+cd D:\APLIKASI\parquet-exporter; git pull
+docker build -f Dockerfile.windows -t parquet-exporter --build-arg HOSTS_ENTRIES="..." .   # sama seperti build terakhir
+docker rm -f parquet-exporter-web; docker rm -f parquet-exporter-worker
+# lalu ulangi kedua `docker run` di langkah 6
+```
+Hentikan worker saat **tidak ada run yang berjalan** (halaman Riwayat Run) — run yang terputus
+ditandai `interrupted` dan bisa diulang. Skema `jobs.db` dinaikkan otomatis saat container start.
+
+### Operasional
+
+```powershell
+docker exec parquet-exporter-worker python exporter.py --list                          # CLI di dalam container
+docker exec parquet-exporter-worker python manage.py add-user <username.sso> --role admin
+docker logs --tail 100 parquet-exporter-worker
+```
+Log run, output lokal, dan backup harian `jobs.db` ada di folder data host
+(`D:\APLIKASI\parquet-exporter-data\logs`, `...\output`, `...\backups`). Restore backup: hentikan kedua
+container → salin `backups\jobs_YYYYMMDD_HHMMSS.db` menjadi `jobs.db` → jalankan lagi.

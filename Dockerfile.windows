@@ -1,0 +1,93 @@
+# escape=`
+#
+# Image Windows container (process isolation) untuk server Docker produksi -- satu image dipakai DUA
+# container: web (CMD default) dan worker (`python worker.py`). Langkah deploy: README §11.
+#
+# Catatan yang WAJIB dijaga (dipelajari dari image aplikasi lain yang sudah jalan di server yang sama):
+#   - Parser directive `# escape=` harus baris PERTAMA file, sebelum komentar apa pun.
+#   - Base image `ltsc2016`: process isolation mewajibkan build OS container = build host
+#     (server target = Windows Server 2016, build 14393). Jangan diganti ke image Linux / ltsc lain.
+#   - Tidak ada image resmi Python untuk Windows -> Python dipasang dari installer python.org.
+#   - Setiap RUN ditulis SATU BARIS (tanpa sambungan backtick) dan memaksa TLS 1.2
+#     (Server Core 2016 tidak selalu mengaktifkannya untuk Invoke-WebRequest).
+#   - JANGAN pakai tanda kutip ganda (") di dalam RUN: perintah diteruskan ke
+#     `powershell -Command` sebagai baris mentah dan kutip ganda dibuang oleh parsing argumen
+#     Windows sebelum PowerShell membacanya. Pakai kutip tunggal + penggabungan string.
+#   - Exit code installer selalu dicek -- Start-Process tidak gagal sendiri kalau installer gagal.
+
+# ---- Tahap 1: build frontend (React + Vite -> dist/) ----
+FROM mcr.microsoft.com/windows/servercore:ltsc2016 AS frontend
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# Vite 7 butuh Node >= 22.12. Versi ini sudah terbukti terpasang di server yang sama (image lain).
+ARG NODE_VERSION=22.23.2
+RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri ('https://nodejs.org/dist/v' + $env:NODE_VERSION + '/node-v' + $env:NODE_VERSION + '-x64.msi') -OutFile C:\node.msi; $p = Start-Process msiexec.exe -ArgumentList '/i', 'C:\node.msi', '/quiet', '/norestart' -Wait -PassThru; if ($p.ExitCode -ne 0) { throw ('Install Node gagal, exit code ' + $p.ExitCode) }; Remove-Item C:\node.msi
+
+ENV PATH="C:\Program Files\nodejs;${PATH}"
+
+WORKDIR C:\src
+COPY frontend/package.json frontend/package-lock.json ./
+# npm ci = persis sesuai lockfile. Kalau gagal karena binding native win32 (@rollup/... atau
+# @tailwindcss/oxide-...) tidak terpasang, tambahkan `RUN npm install -g npm@<versi>` sebelum
+# baris ini (bug optional-dependency npm/cli#4828, pernah kena di image lain di server yang sama).
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ---- Tahap 2: aplikasi (FastAPI + worker) ----
+FROM mcr.microsoft.com/windows/servercore:ltsc2016
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# Sama dengan Python di PC dev tempat requirements.txt diuji.
+ARG PYTHON_VERSION=3.12.9
+RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri ('https://www.python.org/ftp/python/' + $env:PYTHON_VERSION + '/python-' + $env:PYTHON_VERSION + '-amd64.exe') -OutFile C:\python-installer.exe; $p = Start-Process C:\python-installer.exe -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 TargetDir=C:\Python' -Wait -PassThru; if ($p.ExitCode -ne 0) { throw ('Install Python gagal, exit code ' + $p.ExitCode) }; Remove-Item C:\python-installer.exe
+
+ENV PATH="C:\Python;C:\Python\Scripts;${PATH}"
+
+# Visual C++ Redistributable: WAJIB untuk ODBC Driver 17 (prasyarat resmi Microsoft) dan untuk
+# pyarrow (butuh msvcp140.dll; Server Core tidak membawanya). 3010 = sukses, perlu restart.
+RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri https://aka.ms/vc14/vc_redist.x64.exe -OutFile C:\vc_redist.x64.exe; $p = Start-Process C:\vc_redist.x64.exe -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru; if ($p.ExitCode -notin 0, 3010) { throw ('Install VC++ Redistributable gagal, exit code ' + $p.ExitCode) }; Remove-Item C:\vc_redist.x64.exe
+
+# ODBC Driver 17 for SQL Server (x64), link resmi di halaman "Download ODBC Driver for SQL
+# Server" Microsoft Learn (17.11.1.1). Nama driver dipakai CONN_STR di pipeline/config.py.
+ARG ODBC_MSI_URL=https://go.microsoft.com/fwlink/?linkid=2361646&clcid=0x409
+RUN [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri $env:ODBC_MSI_URL -OutFile C:\msodbcsql.msi; $p = Start-Process msiexec.exe -ArgumentList '/i', 'C:\msodbcsql.msi', '/quiet', '/norestart', 'IACCEPTMSODBCSQLLICENSETERMS=YES' -Wait -PassThru; if ($p.ExitCode -notin 0, 3010) { throw ('Install ODBC Driver 17 gagal, exit code ' + $p.ExitCode) }; Remove-Item C:\msodbcsql.msi
+
+WORKDIR C:\app
+
+# Dependensi dulu (layer terpisah) -> ter-cache selama requirements.txt tidak berubah.
+COPY requirements.txt ./
+RUN python -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+
+# DNS di jaringan NAT container server ini tidak bisa meresolve nama internal (terbukti untuk
+# portal SSO di image lain; --add-host tidak berlaku di Windows container). Isi lewat
+# --build-arg HOSTS_ENTRIES="<ip> <nama>;<ip> <nama>" -- IP-nya TIDAK ditulis di file ini
+# (file ini masuk Git). Kosong = hosts tidak diubah. Diletakkan setelah pip supaya mengganti IP
+# tidak memaksa install ulang dependensi.
+ARG HOSTS_ENTRIES=
+RUN if ($env:HOSTS_ENTRIES) { foreach ($e in ($env:HOSTS_ENTRIES -split ';')) { $e = $e.Trim(); if (-not $e) { continue }; if ($e -notmatch '^\d{1,3}(\.\d{1,3}){3}\s+[A-Za-z0-9.-]+$') { throw ('HOSTS_ENTRIES tidak valid: ' + $e) }; Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value ([Environment]::NewLine + $e) } }; Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String -NotMatch '^\s*#' | Select-String '\S'
+
+COPY . .
+COPY --from=frontend C:\src\dist C:\app\frontend\dist
+
+# Gagal di sini = VC++ runtime / ODBC Driver belum lengkap (pyarrow tidak bisa di-load atau driver
+# tidak terdaftar) -- ketahuan saat build, bukan saat run pertama di produksi.
+RUN python scripts\check_runtime.py
+
+# Semua data ada di C:\data -- WAJIB di-bind ke folder host (-v ...:C:\data) yang sama untuk
+# container web & worker. Tanpa mount, web menolak start karena jobs.db tidak ditemukan.
+ENV JOBS_DB=C:\data\jobs.db
+ENV LOG_DIR=C:\data\logs
+ENV RUN_LOG_DIR=C:\data\logs\runs
+ENV OUTPUT_DIR=C:\data\output
+ENV BACKUP_DIR=C:\data\backups
+# Log langsung muncul di `docker logs`; UTF-8 supaya karakter non-ASCII di log tidak error.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONUTF8=1
+
+EXPOSE 8000
+
+# Default = web. Container worker menjalankan image yang sama dengan perintah `python worker.py`.
+CMD ["python", "-m", "uvicorn", "webapp.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -131,3 +131,7 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - Ekspor ad-hoc Viewer **hanya dari job terdaftar** (keputusan keamanan: login exporter bisa membaca
   tabel sensitif); tabel bebas khusus Operator/Admin. Jangan dilonggarkan tanpa persetujuan pemilik.
 - Saat menguji worker/jadwal, opsi run WAJIB `skip_s3: true` — default opsi run = upload ke S3 produksi.
+- **Deploy Docker = Windows container** (`Dockerfile.windows`, README §11): base `servercore:ltsc2016`
+  WAJIB cocok dengan host server Docker (Windows Server 2016, process isolation) — jangan ganti ke image Linux. Di dalam `RUN`
+  jangan pakai kutip ganda (dibuang parsing argumen Windows sebelum PowerShell membacanya). IP untuk
+  `HOSTS_ENTRIES` hanya lewat `--build-arg`, tidak ditulis ke file. Versi di `requirements.txt` dikunci.

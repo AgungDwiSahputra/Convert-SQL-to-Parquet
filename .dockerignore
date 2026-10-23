@@ -1,0 +1,28 @@
+# Rahasia & data milik environment -- TIDAK boleh masuk image. Kredensial diberikan saat
+# runtime (docker run --env-file), data ada di volume C:\data (README §11).
+.env
+.env.*
+!.env.example
+jobs.py
+jobs.db
+jobs.db-*
+*.db
+*.bak
+daftar_tabel_sumber.csv
+
+# Hasil run & arsip lokal
+logs/
+output/
+backups/
+docs/
+
+# Dibangun ulang di dalam image (tahap frontend)
+frontend/node_modules/
+frontend/dist/
+
+# Lain-lain
+.git/
+.claude/
+.vscode/
+**/__pycache__/
+*.pyc

@@ -1,9 +1,11 @@
-pyodbc
-pyarrow
-python-dotenv
-boto3
-tzdata
+# Versi dikunci (==) supaya image Docker di server memakai versi yang sama dengan yang sudah diuji.
+# Naikkan versi dengan sengaja: ubah di sini, uji lokal, lalu build ulang image.
+pyodbc==5.3.0
+pyarrow==25.0.1
+python-dotenv==1.2.2
+boto3==1.43.58
+tzdata==2026.3
 # Web UI (webapp/ + worker.py)
-fastapi
-uvicorn
-httpx
+fastapi==0.141.1
+uvicorn==0.52.4
+httpx==0.28.1
