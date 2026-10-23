@@ -16,7 +16,7 @@ SQL Server 2012 tidak punya dukungan Parquet native. Pipeline ini menjembatani:
 ```
 SQL Server 2012           pipeline/export.py                   AWS S3
 ┌──────────────────┐      ┌────────────────────┐      ┌──────────────────────┐
-│ EXEC dbo.AI_WM_  │      │ pyodbc fetchmany   │      │ datalake/gold/awl/   │
+│ EXEC dbo.AI_WM_  │      │ pyodbc fetchmany   │      │ gold/awl/            │
 │ Assistant        │─────▶│   ↓ (streaming)    │─────▶│   recorded_year=…/   │
 │ @function=N      │      │ pyarrow            │      │    part-00001.parquet│
 │ @TargetDate=…    │      │ ParquetWriter      │      └──────────────────────┘
@@ -257,29 +257,42 @@ python exporter.py --start-date 2026-07-01 --end-date 2026-07-15
 ## 5. Layout S3
 
 Konvensi ditentukan oleh penyusun S3 key di `pipeline/job_templates.py` (`s3_daily`/`s3_weekly`/
-`s3_master`). `S3_PREFIX` global di `pipeline/config.py` (dari `.env`, default `""`); `layer`, `module`,
-`dataset`, dan nama file disimpan per job di `jobs.db` (nama file default
-`DEFAULT_PART_FILE = "part-00001.parquet"`).
+`s3_master`). `S3_PREFIX` global di `pipeline/config.py` (dari `.env`, default `""` = `layer` langsung
+di root bucket); `layer`, `module`, `dataset`, dan nama file disimpan per job di `jobs.db`.
+Bucket: `s3://<nama-bucket-s3-anda>/` (`S3_BUCKET_NAME` di `.env`). Contoh path lengkap tiap job
+tampil di Web UI (detail job & preview wizard).
 
-Bucket produksi: `s3://<nama-bucket-s3-anda>/` (isi lewat `S3_BUCKET_NAME` di `.env`, lihat `pipeline/config.py`). Path lengkap punya **segmen `source=`
-opsional** di antara `layer` dan `dataset`, mengikuti taksonomi sistem (mis. `ARS`,
-`PZO`, `WLR`, `HMS`, `MCS`). Berbeda dari draf sebelumnya, `source` dan `dataset`
-DITULIS key=value juga (bukan folder polos) supaya konsisten hive-style dengan
-segmen tanggal:
+Segmen `module` dan `dataset` ditulis sebagai **folder polos**; hanya segmen partisi tanggal yang
+berbentuk `kunci=nilai`:
 
 ```
-datalake/bronze/source=ars/dataset=hk_transactions/recorded_year=2026/recorded_month=07/recorded_day=20/part-00001.parquet
-└──┬───┘ └──┬──┘ └───┬────┘ └───────┬───────────┘ └──────────────────┬──────────────────────────────┘ └──────┬──────┘
-prefix    layer    source        dataset                    partisi Hive-style                          nama file
+[prefix/]{layer}/{module}/{dataset}/recorded_year=YYYY/recorded_month=MM/recorded_day=DD/{file}      harian
+[prefix/]{layer}/{module}/{dataset}/recorded_year=YYYY/recorded_month=MM/recorded_week=W{n}/{file}   mingguan
+[prefix/]{layer}/{module}/master_{dataset}/snapshot_date=YYYY-MM-DD/{file}                           master
 ```
 
-Kalau `module=None` (default), segmen `source=` dilewati begitu saja — hasilnya
-`{layer}/dataset={dataset}/...`. Ini dipakai untuk job yang belum dipetakan ke modul
-manapun (lihat tabel pemetaan di bawah).
+```
+bronze/ars/hk_transactions/recorded_year=2026/recorded_month=07/recorded_day=20/bronze_ars_hk_transactions.parquet
+└─┬──┘ └┬┘ └──────┬──────┘ └────────────────────────┬─────────────────────────┘ └───────────────┬────────────────┘
+layer module   dataset                     partisi Hive-style                               nama file
+```
+
+- **`module` opsional.** Kosong → segmen dilewati: `{layer}/{dataset}/...` (dipakai beberapa job gold
+  lama). Wizard Web UI memperingatkan kalau modul kosong.
+- **Nama segmen case-sensitive** — di S3 `pzo/` dan `PZO/` adalah dua folder berbeda. Job baru memakai
+  huruf kecil (`hms`, `iot`, `pzo`, ...); beberapa job gold lama memakai huruf besar dan dibiarkan
+  karena path-nya sudah terkunci (lihat bagian 9).
+- **Nama file**: template bronze memakai **nama file output job** (default `{nama_job}.parquet`;
+  `bronze_master` bisa memakai `s3_file_name` lain untuk job lama yang terlanjur diupload dengan nama
+  generik). `sp_job`/`custom_sql` memakai `file_name` di spesifikasi S3-nya, default
+  `DEFAULT_PART_FILE = "part-00001.parquet"`.
+- Draf awal sempat merencanakan segmen `source=`/`dataset=` berbentuk `kunci=nilai`. Itu **tidak**
+  diterapkan dan jangan "diperbaiki" di kode — semua path produksi sudah terkunci; mengubah bentuk
+  path = memindahkan seluruh data di S3.
 
 Lima keputusan desain yang **jangan diubah tanpa alasan kuat**:
 
-1. **Format `kunci=nilai` pada nama folder.** Inilah yang membuat Athena/Spark/Glue
+1. **Format `kunci=nilai` pada folder partisi tanggal.** Inilah yang membuat Athena/Spark/Glue
    crawler otomatis mengenali `recorded_year` dkk sebagai kolom partisi, sehingga
    `WHERE recorded_year=2026 AND recorded_month=07` hanya memindai folder relevan
    (partition pruning).
@@ -287,25 +300,26 @@ Lima keputusan desain yang **jangan diubah tanpa alasan kuat**:
 2. **Nilai partisi diambil dari `target_date`, bukan jam run.** Konsekuensinya
    re-run/backfill tanggal yang sama menimpa partisi yang sama → pipeline idempoten.
 
-3. **Nama file konstan (default `part-00001.parquet`).** Athena/Spark membaca **semua**
-   file dalam satu folder partisi lalu menggabungkannya. Karena tiap job mengembalikan
-   data **penuh** untuk tanggalnya (bukan delta), nama file yang auto-increment atau
-   ber-timestamp antar-run akan membuat data **terhitung dobel**. Nama konstan =
-   overwrite = benar. `file_name` boleh di-custom per job (parameter opsional di
-   `s3_daily`/`s3_weekly`/`s3_master`), TAPI harus tetap konstan antar-run untuk
-   partisi yang sama — bukan untuk auto-increment.
+3. **Nama file konstan antar-run.** Athena/Spark membaca **semua** file dalam satu folder
+   partisi lalu menggabungkannya. Karena tiap job mengembalikan data **penuh** untuk
+   tanggalnya (bukan delta), nama file yang auto-increment atau ber-timestamp antar-run akan
+   membuat data **terhitung dobel**. Nama konstan = overwrite = benar. Nama file boleh berbeda
+   per job, TAPI harus tetap sama antar-run untuk partisi yang sama. Karena alasan yang sama,
+   dua job tidak boleh berbagi folder dataset walau nama filenya beda (dicek
+   `job_validation`, bagian 9).
 
 4. **Master diberi awalan `master_`.** Tanpa itu, transaksional `manual_wl_tmat` dan
    master `manual_wl_tmat` jatuh ke folder yang sama dengan skema partisi berbeda
    (`recorded_*` vs `snapshot_date`) — Glue crawler akan gagal menyimpulkan skema.
-   Aturan ini tetap berlaku di dalam segmen `module` yang sama (mis. `PZO/manual_wl_tmat`
-   vs `PZO/master_manual_wl_tmat`).
+   Aturan ini tetap berlaku di dalam segmen `module` yang sama (mis. `pzo/manual_wl_tmat`
+   vs `pzo/master_manual_wl_tmat`).
 
-5. **Segmen `source=` letaknya SELALU tepat di bawah `layer`, di atas `dataset=`.**
+5. **Segmen `module` letaknya SELALU tepat di bawah `layer`, di atas `dataset`.**
    Konsisten di bronze/silver/gold supaya satu sistem (mis. ARS) gampang ditelusuri
-   lintas layer. Job yang belum dipetakan modulnya (lihat tabel di atas) sengaja
-   dibiarkan `module=None` daripada ditebak — salah tebak modul di path S3 produksi
-   sulit dideteksi (silent, sama seperti tabrakan `s3_key` biasa).
+   lintas layer. Kalau modul sebuah tabel belum jelas, lebih baik dikosongkan daripada
+   ditebak — salah tebak modul di path S3 produksi sulit dideteksi (silent, sama seperti
+   tabrakan `s3_key` biasa), dan setelah upload pertama path terkunci; memindahkannya
+   meninggalkan data lama di path lama.
 
 Master memakai **snapshot per tanggal**, bukan satu file yang di-overwrite, agar
 dataset ML reproducible (model yang dilatih dengan master kondisi 20 Juli tetap bisa
@@ -353,7 +367,7 @@ python exporter.py --date 2026-07-20 --skip-s3 -b 20000
 4. **`name`, `output`, dan hasil `s3_key` harus unik antar job.** Dua job dengan
    `output` sama akan saling menimpa file lokal; `s3_key` sama akan saling menimpa
    objek S3 — keduanya senyap, tanpa error.
-5. **Jangan membuat `PART_FILE` dinamis** (timestamp, UUID, atau nomor berurut) selama
+5. **Jangan membuat nama file S3 dinamis** (timestamp, UUID, atau nomor berurut) selama
    tiap job masih mengembalikan data penuh per tanggal. Lihat poin 3 di bagian 5.
 6. **Kredensial hanya dari environment/`.env`.** Jangan pernah hard-code di `pipeline/config.py`.
 7. **`overrides`** ditulis sebagai objek `pa.DataType` di `jobs.py` (mis. `pa.decimal128(18, 4)`)

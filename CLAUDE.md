@@ -98,8 +98,12 @@ Semua path default (`output/`, `logs/`, `jobs.db`, `backups/`) relatif ke folder
 | `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite). Warna lewat token `brand-*`/`gray-*`/`blue-*` di `src/index.css` (palet hijau, mode terang) — jangan pakai warna Tailwind lain (indigo/slate/emerald) atau kelas `dark:` | Tampilan Web UI |
 
 Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di README.md §5):
-- **Nama file S3 konstan** (`part-00001.parquet`) — tiap job menulis data penuh per-partisi
+- **Nama file S3 konstan antar-run** (bronze = nama file output job, mis. `bronze_xxx.parquet`;
+  `sp_job`/`custom_sql` default `part-00001.parquet`) — tiap job menulis data penuh per-partisi
   (bukan delta), jadi nama auto-increment/timestamp bikin data terhitung dobel di Athena/Spark.
+- **Bentuk path S3**: `{layer}/{module}/{dataset}/<partisi>/{file}` — `module`/`dataset` folder polos
+  (BUKAN `source=`/`dataset=`), `module` opsional, nama segmen case-sensitive. Path produksi terkunci;
+  jangan ubah bentuknya (README §5).
 - **Partisi Hive-style `kunci=nilai`** (`recorded_year=`, dst.) diambil dari `target_date`
   proses, bukan jam run — supaya re-run/backfill idempoten (overwrite partisi yang sama).
 - **Kolom audit `_ingested_at`** ditambahkan otomatis ke semua job (bronze & gold) di

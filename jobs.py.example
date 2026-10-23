@@ -31,9 +31,10 @@ CATATAN layout S3 (Hive-style partitioning):
         gold/example/daily_metric/recorded_year=2026/recorded_month=07/recorded_day=20/part-00001.parquet
   - Nama folder berbentuk 'kunci=nilai' membuat Athena/Spark/Glue crawler otomatis
     mengenali recorded_year/recorded_month/recorded_day sebagai KOLOM PARTISI.
-  - Nama file selalu konstan (part-00001.parquet) karena satu job = satu file penuh
-    per tanggal (bukan delta) -- re-run/backfill tanggal yang sama akan MENIMPA
-    partisi yang sama, bukan menumpuk duplikat (idempoten).
+  - Nama file konstan antar-run (helper sp: part-00001.parquet; helper bronze: nama file
+    output job) karena satu job = satu file penuh per tanggal (bukan delta) --
+    re-run/backfill tanggal yang sama akan MENIMPA partisi yang sama, bukan menumpuk
+    duplikat (idempoten).
   - Master/dimensi dipisah lewat prefix 'master_' dan partisi snapshot_date=YYYY-MM-DD
     (1 level saja, cukup untuk tabel kecil yang dibaca "ambil snapshot terbaru").
 """
