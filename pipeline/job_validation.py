@@ -19,9 +19,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from job_store import JobRow, default_target_date
-from job_templates import (
-    DATE_VARS, S3_LAYOUTS, STRDATE_FORMATS, TEMPLATES, build_job, parse_arrow_type, s3_folder,
+from pipeline.job_store import JobRow, default_target_date
+from pipeline.job_templates import (
+    DATE_VARS, S3_LAYOUTS, SAMPLE_FIRST_ROW, STRDATE_FORMATS, TEMPLATES, build_job, parse_arrow_type, s3_folder,
 )
 
 ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
@@ -80,9 +80,6 @@ SESSION_USER SET SETUSER SHUTDOWN SOME STATISTICS SYSTEM_USER TABLE TABLESAMPLE 
 TRANSACTION TRIGGER TRUNCATE TRY_CONVERT TSEQUAL UNION UNIQUE UNPIVOT UPDATE UPDATETEXT USE USER VALUES
 VARYING VIEW WAITFOR WHEN WHERE WHILE WITH WRITETEXT
 """.split())
-
-# Baris pertama hasil query palsu -- untuk menghitung contoh path S3 layout mingguan.
-_SAMPLE_FIRST_ROW = {"week_year": 2026, "week_month": 7, "week_of_month": 3}
 
 BIG_MASTER_ROWS = 1_000_000
 
@@ -396,10 +393,10 @@ def validate_job(name: str, template: str, args: dict, *, role: str, rows: list[
 
     s3_key = None
     if job.s3_key:
-        s3_key = job.s3_key(dict(_SAMPLE_FIRST_ROW))
+        s3_key = job.s3_key(dict(SAMPLE_FIRST_ROW))
     if original and original.s3_locked_at:
         old = build_job(original.name, original.template, original.args, target_date)
-        old_key = old.s3_key(dict(_SAMPLE_FIRST_ROW)) if old.s3_key else None
+        old_key = old.s3_key(dict(SAMPLE_FIRST_ROW)) if old.s3_key else None
         if old_key != s3_key:
             if ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]:
                 v.errors["s3"] = ("Path S3 job ini sudah dipakai sejak "

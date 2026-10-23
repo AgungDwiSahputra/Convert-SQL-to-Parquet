@@ -8,8 +8,8 @@ from typing import Iterator
 
 from fastapi import Cookie, Depends, HTTPException, status
 
-import run_store
-from job_store import utc_now
+from pipeline import run_store
+from pipeline.job_store import utc_now
 
 SESSION_COOKIE = "pqx_session"
 ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}

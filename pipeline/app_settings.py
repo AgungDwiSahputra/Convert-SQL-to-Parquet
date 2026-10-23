@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from job_store import utc_now
+from pipeline.job_store import utc_now
 
 DEFAULTS = {
     "notify.recipients": [],        # email yang selalu menerima notifikasi

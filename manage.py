@@ -21,8 +21,8 @@ import argparse
 import sqlite3
 import sys
 
-import run_store
-from job_store import JobStoreError, init_db, utc_now
+from pipeline import run_store
+from pipeline.job_store import JobStoreError, init_db, utc_now
 
 ROLES = ("viewer", "operator", "admin")
 

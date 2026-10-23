@@ -43,7 +43,7 @@ from __future__ import annotations
 from datetime import datetime as _datetime, timedelta as _timedelta
 
 import pyarrow as pa
-from job import Job
+from pipeline.job import Job
 
 # Nama SP dispatcher -- ganti dengan stored procedure sesungguhnya di lingkunganmu.
 SP = "dbo.MyDispatcher_SP"

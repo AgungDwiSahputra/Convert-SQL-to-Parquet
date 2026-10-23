@@ -22,8 +22,8 @@ import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from config import COOKIE_SECURE, SESSION_HOURS, SSO_BASE_URL
-from job_store import utc_now
+from pipeline.config import COOKIE_SECURE, SESSION_HOURS, SSO_BASE_URL
+from pipeline.job_store import utc_now
 from webapp.deps import SESSION_COOKIE, current_user, get_db, hash_token
 
 router = APIRouter()

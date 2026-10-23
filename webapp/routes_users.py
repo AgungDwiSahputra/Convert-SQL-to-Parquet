@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from job_store import utc_now
+from pipeline.job_store import utc_now
 from webapp.deps import get_db, require_role
 
 router = APIRouter()

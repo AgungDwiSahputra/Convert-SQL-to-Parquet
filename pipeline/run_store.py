@@ -21,8 +21,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from config import RUN_LOG_DIR
-from job_store import JobRow, build_jobs, connect, utc_now, write_tx
+from pipeline.config import RUN_LOG_DIR
+from pipeline.job_store import JobRow, build_jobs, connect, utc_now, write_tx
 
 # Run 'running' yang heartbeat-nya lebih tua dari ini dianggap worker-nya mati di tengah jalan.
 HEARTBEAT_STALE_S = 90
@@ -281,7 +281,7 @@ def start_item(conn: sqlite3.Connection, item_id: int) -> None:
 
 
 def finish_item(conn: sqlite3.Connection, item_id: int, status: str, result=None, error: str | None = None) -> None:
-    """result = exporter.JobResult (untuk status 'success')."""
+    """result = export.JobResult (untuk status 'success')."""
     conn.execute(
         "UPDATE run_items SET status = ?, rows = ?, size_bytes = ?, location = ?, s3_key = ?, elapsed_s = ?, "
         "error = ?, finished_at = ? WHERE id = ?",

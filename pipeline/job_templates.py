@@ -26,8 +26,8 @@ from typing import Callable
 
 import pyarrow as pa
 
-from config import S3_PREFIX
-from job import Job
+from pipeline.config import S3_PREFIX
+from pipeline.job import Job
 
 # Nama file parquet default di S3. KONSTAN antar-run (bukan auto-increment/timestamp),
 # karena tiap job menulis data PENUH per partisi -- lihat README bagian 5 poin 3.
@@ -70,6 +70,11 @@ def s3_weekly(target_date: str, dataset: str, *, layer: str, module: str | None 
     return build
 
 
+# Baris pertama hasil query palsu -- untuk menghitung contoh path S3 layout mingguan (s3_weekly
+# membacanya) saat validasi job di Web UI dan parity check migrate_jobs.py.
+SAMPLE_FIRST_ROW = {"week_year": 2026, "week_month": 7, "week_of_month": 3}
+
+
 def s3_master(target_date: str, dataset: str, *, layer: str, module: str | None = None,
               file_name: str = DEFAULT_PART_FILE):
     """Master/dimensi, snapshot penuh per tanggal proses: {layer}/{module}/master_{dataset}/snapshot_date=/{file_name}"""
@@ -102,7 +107,7 @@ def s3_key_from_spec(spec: dict | None, target_date: str):
 
 # Bentuk teks = str() dari tipe pyarrow-nya (mis. str(pa.float64()) == "double"), supaya
 # yang tampil di log schema exporter sama dengan yang ditulis di override.
-_SIMPLE_ARROW_TYPES = {str(t()): t for t in (
+SIMPLE_ARROW_TYPES = {str(t()): t for t in (
     pa.string, pa.bool_, pa.int8, pa.int16, pa.int32, pa.int64,
     pa.float32, pa.float64, pa.date32, pa.binary,
 )}
@@ -114,8 +119,8 @@ def parse_arrow_type(spec: str) -> pa.DataType:
     nilai override nantinya bisa datang dari form web.
     """
     s = spec.strip()
-    if s in _SIMPLE_ARROW_TYPES:
-        return _SIMPLE_ARROW_TYPES[s]()
+    if s in SIMPLE_ARROW_TYPES:
+        return SIMPLE_ARROW_TYPES[s]()
     m = re.fullmatch(r"decimal128\(\s*(\d+)\s*,\s*(\d+)\s*\)", s)
     if m:
         return pa.decimal128(int(m[1]), int(m[2]))
@@ -123,7 +128,7 @@ def parse_arrow_type(spec: str) -> pa.DataType:
     if m:
         return pa.timestamp(m[1])
     raise ValueError(f"tipe override tidak dikenal: {spec!r} (contoh valid: 'decimal128(18, 4)', "
-                     f"'timestamp[us]', {', '.join(repr(k) for k in _SIMPLE_ARROW_TYPES)})")
+                     f"'timestamp[us]', {', '.join(repr(k) for k in SIMPLE_ARROW_TYPES)})")
 
 
 def parse_overrides(overrides: dict[str, str] | None) -> dict[str, pa.DataType]:

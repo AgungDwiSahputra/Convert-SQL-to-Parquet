@@ -18,7 +18,11 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()  # baca file .env di folder ini (kalau ada) ke environment variable
+# Folder proyek (induk folder pipeline/). Semua path default di bawah relatif ke sini, BUKAN ke
+# folder tempat perintah dijalankan -- hasilnya sama dari .bat, Task Scheduler, maupun terminal.
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+load_dotenv(os.path.join(PROJECT_DIR, ".env"))  # baca .env di folder proyek (kalau ada) ke environment variable
 
 # --- Koneksi SQL Server ---
 CONN_STR = (
@@ -34,14 +38,14 @@ CONN_STR = (
 # --- Setelan ekspor default ---
 BATCH_SIZE = 100_000        # baris per fetch; turunkan bila memori terbatas
 COMPRESSION = "zstd"        # dataset AI/arsip: rasio bagus, decode cepat
-OUTPUT_DIR = "output"       # folder tujuan file .parquet (dibuat otomatis)
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(PROJECT_DIR, "output"))  # file .parquet lokal (dibuat otomatis)
 
 # --- Daftar job (SQLite) ---
 # Dibuat/diisi oleh migrate_jobs.py, dibaca exporter.py (lihat job_store.py). Masuk
 # .gitignore -- isinya query/nama tabel/S3 key nyata milik environment ini.
-JOBS_DB = os.environ.get("JOBS_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db"))
+JOBS_DB = os.environ.get("JOBS_DB", os.path.join(PROJECT_DIR, "jobs.db"))
 
-# --- Upload ke S3 (opsional per job, lihat s3_key di jobs.py) ---
+# --- Upload ke S3 (opsional per job, lihat kunci S3 job di job_templates.py) ---
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -74,12 +78,15 @@ SMTP_LOCAL_HOSTNAME = os.environ.get("SMTP_LOCAL_HOSTNAME", "") or None   # nama
 # --- Ekspor ad-hoc (download .parquet dari browser) ---
 ADHOC_MAX_ROWS = int(os.environ.get("ADHOC_MAX_ROWS", "500000"))
 
+# --- Log proses CLI & worker (logs/exporter_*.log, logs/worker_*.log) ---
+LOG_DIR = os.environ.get("LOG_DIR", os.path.join(PROJECT_DIR, "logs"))
+
 # --- Log per run Web UI (logs/runs/run_<id>.log) ---
 # Nomor run berasal dari database: database lain (mis. salinan untuk uji) WAJIB memakai folder log
 # lain, kalau tidak log run-nya bercampur dengan run asli yang bernomor sama.
-RUN_LOG_DIR = os.environ.get("RUN_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "runs"))
+RUN_LOG_DIR = os.environ.get("RUN_LOG_DIR", os.path.join(PROJECT_DIR, "logs", "runs"))
 
 # --- Pemeliharaan harian (dijalankan worker.py) ---
-BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups"))
+BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(PROJECT_DIR, "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "14"))                 # jumlah backup jobs.db yang disimpan
 LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "90"))   # umur maks log run & log worker

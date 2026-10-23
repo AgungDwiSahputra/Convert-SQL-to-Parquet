@@ -23,12 +23,12 @@ import ssl
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-import run_store
-from app_settings import get_settings
-from config import (
+from pipeline import run_store
+from pipeline.app_settings import get_settings
+from pipeline.config import (
     APP_BASE_URL, SMTP_FROM, SMTP_HOST, SMTP_LOCAL_HOSTNAME, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USER,
 )
-from job_store import utc_now
+from pipeline.job_store import utc_now
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SUBJECT_PREFIX = "[Parquet Exporter]"

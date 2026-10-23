@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `README.md` di root repo ini ditulis khusus supaya AI bisa langsung paham alur, batasan, dan
 aturan modifikasi tanpa membaca ulang seluruh kode — lengkap dengan referensi `file.py:NN`.
-**Sebelum melakukan perubahan non-trivial di `exporter.py`, `jobs.py`, atau layout S3, baca
+**Sebelum melakukan perubahan non-trivial di `pipeline/`, `exporter.py`, atau layout S3, baca
 README.md secara utuh.** Ringkasan di bawah ini hanya menyorot yang paling penting.
 
 ## Apa proyek ini
@@ -24,8 +24,8 @@ pip install -r requirements.txt
 ```
 
 - Butuh **ODBC Driver 17 for SQL Server** terinstall terpisah di OS (bukan lewat pip).
-- Salin `.env.example` → `.env`, isi kredensial SQL Server + AWS S3 (dibaca `config.py` via
-  `python-dotenv`; jangan pernah hard-code kredensial di `config.py`).
+- Salin `.env.example` → `.env`, isi kredensial SQL Server + AWS S3 (dibaca `pipeline/config.py` via
+  `python-dotenv`; jangan pernah hard-code kredensial di `pipeline/config.py`).
 - Salin `jobs.py.example` → `jobs.py`. **`jobs.py` sengaja masuk `.gitignore`** — berisi
   query/nama tabel/struktur S3 key nyata milik environment masing-masing, jadi setiap
   clone/environment punya `jobs.py` sendiri yang tidak ter-commit. `jobs.py.example` adalah
@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 Tidak ada test suite otomatis di proyek ini. Verifikasi perubahan lewat run manual, mis.
 `python exporter.py --date <tanggal> --skip-s3 --only <nama_job>` lalu cek file di `output/`.
-Perubahan di `job_templates.py` / `job_store.py` / `migrate_jobs.py` wajib lolos
+Perubahan di `pipeline/job_templates.py` / `pipeline/job_store.py` / `migrate_jobs.py` wajib lolos
 `python migrate_jobs.py --check` (bukti Job identik byte-per-byte dengan `jobs.py`).
 
 ## Commands
@@ -56,8 +56,10 @@ python exporter.py --start-date 2026-07-01 --end-date 2026-07-15    # mode range
 python exporter.py --skip-s3 -b 20000 -c snappy                     # ubah batch size & kompresi
 ```
 
-`run_exporter.bat` adalah wrapper untuk Windows Task Scheduler (auto-detect `python`/`py` di
-PATH, cd ke folder sendiri dulu) — menjalankan `--only "bronze_*" --skip-local` terjadwal.
+`run_exporter.bat` adalah wrapper untuk Windows Task Scheduler (cd ke folder sendiri dulu, cari
+`python`/`py` lewat `scripts/find_python.bat`) — menjalankan `--only "bronze_*" --skip-local` terjadwal.
+**Jangan menjalankan `run_*.bat` asli untuk menguji**: `run_exporter.bat` mengunggah ke S3 produksi dan
+`run_worker.bat` memakai `jobs.db` asli (uji lewat salinan di folder lain + skrip python palsu).
 
 Web UI (Fase 1, detail di README.md §8) — dua proses terpisah + build frontend:
 
@@ -70,20 +72,29 @@ python worker.py                                         # = run_worker.bat (eks
 
 ## Arsitektur (ringkas — detail lengkap di README.md)
 
+Folder proyek hanya berisi **skrip yang dijalankan langsung** (`exporter.py`, `worker.py`,
+`manage.py`, `migrate_jobs.py`, `run_*.bat`); kode inti yang dipakai bersama ada di package
+**`pipeline/`** (impor `from pipeline.xxx import ...`), kode khusus web di `webapp/`. Modul library
+baru masuk `pipeline/`, bukan folder proyek. Jangan mengimpor nama berawalan `_` dari modul lain.
+Semua path default (`output/`, `logs/`, `jobs.db`, `backups/`) relatif ke folder proyek
+(`pipeline/config.PROJECT_DIR`) dan bisa diganti lewat `.env` (`OUTPUT_DIR`, `LOG_DIR`, `JOBS_DB`,
+`RUN_LOG_DIR`, `BACKUP_DIR`) — dipakai untuk mengisolasi uji dari data asli.
+
 | File | Peran | Kapan diedit |
 |---|---|---|
-| `jobs.py` | Format lama daftar ekspor (gitignored) — hanya bootstrap env baru & arsip | Tidak lagi |
+| `jobs.py` | Format lama daftar ekspor (gitignored) — hanya bootstrap env baru & arsip. `from job import Job` di dalamnya tetap jalan (alias di `migrate_jobs.py`) | Tidak lagi |
 | `jobs.db` | Daftar ekspor yang **dibaca exporter** (SQLite, gitignored): nama + template + args JSON + enabled + notes + kunci S3 | **Lewat Web UI** (Daftar Job → Tambah/Edit) |
-| `job_validation.py` | Aturan validasi job dari UI (identifier dicek ke SQL Server, keunikan folder S3, role template, kunci S3) | Saat aturan/template berubah |
-| `job_templates.py` | Template job (pindahan helper `jobs.py`) + penyusun S3 key. Generik, masuk Git | Saat butuh pola query baru |
-| `job_store.py` | Akses `jobs.db`, `build_jobs(target_date, rows)`, `default_target_date()` | Saat struktur tabel berubah |
+| `exporter.py` | CLI: argumen, loop tanggal × job, ringkasan & exit code | Saat menambah opsi CLI |
 | `migrate_jobs.py` | Migrasi `jobs.py` → `jobs.db` via AST + parity check | Saat menambah template (`HELPER_TO_TEMPLATE`) |
-| `exporter.py` | Mesin eksekusi: CLI, koneksi, deteksi schema, batching, tulis parquet, upload S3 | Jarang — hanya kalau mekanismenya berubah |
-| `job.py` | `@dataclass Job` — struktur satu job | Hanya kalau menambah field baru ke `Job` |
-| `config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, kredensial & setelan Web UI dari `.env` | Saat setelan global berubah |
+| `pipeline/export.py` | Mesin eksekusi (CLI, worker, Web UI): deteksi schema, batching, tulis parquet, upload S3, setup log | Jarang — hanya kalau mekanismenya berubah |
+| `pipeline/job_validation.py` | Aturan validasi job dari UI (identifier dicek ke SQL Server, keunikan folder S3, role template, kunci S3) | Saat aturan/template berubah |
+| `pipeline/job_templates.py` | Template job (pindahan helper `jobs.py`) + penyusun S3 key. Generik, masuk Git | Saat butuh pola query baru |
+| `pipeline/job_store.py` | Akses `jobs.db`, `build_jobs(target_date, rows)`, `default_target_date()` | Saat struktur tabel berubah |
+| `pipeline/job.py` | `@dataclass Job` — struktur satu job | Hanya kalau menambah field baru ke `Job` |
+| `pipeline/config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, path, kredensial & setelan Web UI dari `.env` | Saat setelan global berubah |
 | `webapp/` | FastAPI: login SSO → session sendiri, API jobs/runs/users, sajikan `frontend/dist` | Fitur Web UI |
-| `run_store.py` / `worker.py` | Antrian & riwayat run (`runs`/`run_items` di `jobs.db`) / proses eksekutornya (+ thread scheduler, notifikasi, pemeliharaan) | Mekanisme eksekusi run UI |
-| `scheduler.py` / `notify.py` / `maintenance.py` / `app_settings.py` | Jadwal run otomatis (WIB) / email run gagal & anomali 0 baris / backup `jobs.db` & bersih log harian / setelan non-rahasia (tabel `settings`) | Fase 3 — README §10 |
+| `pipeline/run_store.py` / `worker.py` | Antrian & riwayat run (`runs`/`run_items` di `jobs.db`) / proses eksekutornya (+ thread scheduler, notifikasi, pemeliharaan) | Mekanisme eksekusi run UI |
+| `pipeline/scheduler.py` / `notify.py` / `maintenance.py` / `app_settings.py` | Jadwal run otomatis (WIB) / email run gagal & anomali 0 baris / backup `jobs.db` & bersih log harian / setelan non-rahasia (tabel `settings`) | Fase 3 — README §10 |
 | `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite). Warna lewat token `brand-*`/`gray-*`/`blue-*` di `src/index.css` (palet hijau, mode terang) — jangan pakai warna Tailwind lain (indigo/slate/emerald) atau kelas `dark:` | Tampilan Web UI |
 
 Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di README.md §5):
@@ -92,11 +103,11 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - **Partisi Hive-style `kunci=nilai`** (`recorded_year=`, dst.) diambil dari `target_date`
   proses, bukan jam run — supaya re-run/backfill idempoten (overwrite partisi yang sama).
 - **Kolom audit `_ingested_at`** ditambahkan otomatis ke semua job (bronze & gold) di
-  `exporter.py`, terpisah dari partisi tanggal bisnis — jangan disamakan maknanya.
+  `pipeline/export.py`, terpisah dari partisi tanggal bisnis — jangan disamakan maknanya.
 - Placeholder parameter query pakai `?` (gaya qmark pyodbc), bukan `@param`.
 - `name`, `output`, dan hasil `s3_key` harus unik antar job — tabrakan bersifat senyap (saling
   menimpa file, tanpa error).
-- **`job_templates.py` masuk Git: jangan tulis nilai spesifik environment** (nama DB/SP, IP linked
+- **`pipeline/job_templates.py` masuk Git: jangan tulis nilai spesifik environment** (nama DB/SP, IP linked
   server, nama tabel) di sana — jadikan argumen template; nilainya tersimpan per job di `jobs.db`.
   Whitespace string query di template sengaja identik dengan helper lama (parity byte-per-byte).
 - Skema `jobs.db` berubah = TAMBAH elemen di `job_store._MIGRATIONS` (jangan ubah yang lama).

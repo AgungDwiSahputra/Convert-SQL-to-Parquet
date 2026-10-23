@@ -17,8 +17,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-import run_store
-from job_store import init_db
+from pipeline import run_store
+from pipeline.job_store import init_db
 from webapp import (
     routes_adhoc, routes_auth, routes_jobs, routes_runs, routes_schedules, routes_schema, routes_settings, routes_users,
 )

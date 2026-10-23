@@ -1,38 +1,14 @@
 @echo off
 REM Wrapper utk double-click / Windows Task Scheduler -- pastikan working
-REM directory benar (supaya .env & folder output/ terbaca relatif ke lokasi
-REM file ini). TIDAK perlu redirect/tee manual -- exporter.py sendiri sudah
-REM log ke console DAN ke file logs\ sekaligus (lihat exporter.py, _LOG_FILE).
+REM directory benar (folder file ini). TIDAK perlu redirect/tee manual --
+REM exporter.py sendiri sudah log ke console DAN ke file logs\ sekaligus
+REM (lihat pipeline\export.py, setup_logging).
+REM Python dicari otomatis lewat PATH -- lihat scripts\find_python.bat.
 
 cd /d "%~dp0"
+call scripts\find_python.bat
+if errorlevel 1 exit /b %errorlevel%
 
-REM --- Cari python.exe otomatis lewat PATH (PORTABLE -- tidak hardcode path
-REM user/komputer tertentu, supaya .bat ini tetap jalan kalau dipindah ke
-REM server lain / akun Windows lain tanpa perlu diedit manual tiap kali). ---
-REM 1) coba "python" biasa dulu.
-where python >nul 2>nul
-if %errorlevel%==0 (
-    set "PYTHON_EXE=python"
-    goto :run
-)
-
-REM 2) fallback ke Python Launcher ("py") -- terdaftar system-wide di PATH oleh
-REM    installer resmi python.org terlepas dari akun mana yang menginstallnya,
-REM    jadi lebih tahan banting lintas server/akun dibanding path AppData user.
-where py >nul 2>nul
-if %errorlevel%==0 (
-    set "PYTHON_EXE=py"
-    goto :run
-)
-
-echo ERROR: python.exe / py.exe tidak ditemukan di PATH komputer ini.
-echo   - Pastikan Python terinstall dan "Add python.exe to PATH" tercentang
-echo     saat instalasi, ATAU
-echo   - Isi manual path lengkap python.exe di baris PYTHON_EXE di bawah ini.
-REM set "PYTHON_EXE=C:\path\lengkap\ke\python.exe"
-exit /b 9009
-
-:run
 "%PYTHON_EXE%" exporter.py --only "bronze_*" --skip-local
 
 set EXITCODE=%ERRORLEVEL%

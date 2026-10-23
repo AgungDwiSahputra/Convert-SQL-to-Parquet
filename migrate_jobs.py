@@ -40,10 +40,11 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-from config import JOBS_DB, S3_PREFIX
-from job_store import JobRow, JobStoreError, build_jobs, connect, default_target_date, init_db, \
+from pipeline import job as job_module
+from pipeline.config import JOBS_DB, S3_PREFIX
+from pipeline.job_store import JobRow, JobStoreError, build_jobs, connect, default_target_date, init_db, \
     load_job_rows, replace_all_jobs, ui_edit_summary
-from job_templates import parse_arrow_type
+from pipeline.job_templates import SAMPLE_FIRST_ROW, parse_arrow_type
 
 # Helper lama di jobs.py -> nama template di job_templates.py.
 HELPER_TO_TEMPLATE = {
@@ -66,9 +67,6 @@ _JOB_SIGNATURE = (["name", "query", "output", "params", "overrides", "labels", "
 # baris. Bukan sekadar "nama(" -- prosa seperti "bronze_daily_strdate() menulis ..." ditolak.
 _CODE_START = re.compile(r"^[A-Za-z_]\w*\(\s*(?:[\"']|$)")
 _MAX_COMMENTED_LINES = 60
-
-# Baris pertama hasil query palsu untuk memanggil s3_key saat parity (s3_weekly membacanya).
-_SAMPLE_FIRST_ROW = {"week_year": 2026, "week_month": 7, "week_of_month": 3}
 
 
 class MigrationError(Exception):
@@ -330,6 +328,8 @@ def default_check_dates() -> list[str]:
 
 
 def _exec_module(src: str, filename: str, name: str) -> types.ModuleType:
+    # jobs.py lama menulis `from job import Job`, padahal job.py sudah pindah ke pipeline/.
+    sys.modules.setdefault("job", job_module)
     mod = types.ModuleType(name)
     mod.__file__ = filename
     exec(compile(src, filename, "exec"), mod.__dict__)
@@ -344,7 +344,7 @@ def _fingerprint(job) -> dict:
         "overrides": {col: str(t) for col, t in job.overrides.items()},
         "labels": list(job.labels),
         "needs_date": job.needs_date,
-        "s3_key": job.s3_key(dict(_SAMPLE_FIRST_ROW)) if job.s3_key else None,
+        "s3_key": job.s3_key(dict(SAMPLE_FIRST_ROW)) if job.s3_key else None,
     }
 
 

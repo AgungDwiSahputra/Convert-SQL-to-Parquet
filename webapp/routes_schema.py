@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from job_validation import DATETIME_TYPES, EPOCH_TYPES, STRING_TYPES
+from pipeline.job_validation import DATETIME_TYPES, EPOCH_TYPES, STRING_TYPES
 from webapp.catalog import CATALOG, CatalogError, detect_date_format
 from webapp.deps import require_role
 

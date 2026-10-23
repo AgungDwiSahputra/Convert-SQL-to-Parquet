@@ -18,10 +18,10 @@ from datetime import datetime, timedelta
 
 import pyodbc
 
-from config import CONN_STR
-from exporter import _advance_to_resultset_with_columns, build_schema, rows_to_table
-from job import Job
-from job_templates import STRDATE_FORMATS
+from pipeline.config import CONN_STR
+from pipeline.export import advance_to_resultset_with_columns, build_schema, rows_to_table
+from pipeline.job import Job
+from pipeline.job_templates import STRDATE_FORMATS
 
 _CACHE_TTL_S = 120
 _LOGIN_TIMEOUT_S = 15
@@ -256,7 +256,7 @@ def export_parquet(job: Job, path: str, max_rows: int, compression: str = "zstd"
             cur = conn.cursor()
             cur.execute(f"SET ROWCOUNT {int(max_rows) + 1}")
             cur.execute(job.query, job.params) if job.params else cur.execute(job.query)
-            if not _advance_to_resultset_with_columns(cur):
+            if not advance_to_resultset_with_columns(cur):
                 raise CatalogError("Query tidak menghasilkan resultset berkolom.")
             schema = build_schema(cur, job.overrides)
             schema = schema.append(pa.field("_ingested_at", pa.timestamp("us", tz="UTC")))
@@ -307,7 +307,7 @@ def test_run(job: Job, limit: int = 100) -> dict:
             cur = conn.cursor()
             cur.execute(f"SET ROWCOUNT {limit}")
             cur.execute(job.query, job.params) if job.params else cur.execute(job.query)
-            if not _advance_to_resultset_with_columns(cur):
+            if not advance_to_resultset_with_columns(cur):
                 return {"rows": 0, "limit": limit, "limit_hit": False, "elapsed_s": time.monotonic() - started,
                         "columns": [], "sample": [], "message": "Query tidak menghasilkan resultset berkolom."}
             sql_types = [getattr(d[1], "__name__", str(d[1])) for d in cur.description]

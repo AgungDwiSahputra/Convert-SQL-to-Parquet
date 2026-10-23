@@ -13,12 +13,12 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from job_store import (
+from pipeline.job_store import (
     JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, load_job_rows,
     set_job_enabled, update_job,
 )
-from job_templates import STRDATE_FORMATS, _SIMPLE_ARROW_TYPES, build_job, s3_folder, s3_target_info
-from job_validation import TEMPLATE_SPECS, can_edit, validate_job
+from pipeline.job_templates import STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, s3_folder, s3_target_info
+from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, test_run
 from webapp.deps import current_user, get_db, require_role
 
@@ -107,7 +107,7 @@ def templates(_user: dict = Depends(current_user)):
     return {
         "templates": [{"key": k, **v} for k, v in TEMPLATE_SPECS.items()],
         "strdate_formats": [{"value": k, "label": v} for k, v in STRDATE_FORMATS.items()],
-        "override_types": sorted(_SIMPLE_ARROW_TYPES) + ["decimal128(18, 4)", "decimal128(38, 10)", "timestamp[us]"],
+        "override_types": sorted(SIMPLE_ARROW_TYPES) + ["decimal128(18, 4)", "decimal128(38, 10)", "timestamp[us]"],
     }
 
 
