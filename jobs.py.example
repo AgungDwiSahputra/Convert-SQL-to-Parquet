@@ -1,10 +1,16 @@
 """
-DAFTAR JOB - inilah satu-satunya file yang perlu diedit untuk menambah tabel/ekspor.
+DAFTAR JOB - file yang diedit untuk menambah tabel/ekspor.
 
 INI ADALAH TEMPLATE. Salin file ini menjadi `jobs.py` (sudah masuk .gitignore, tidak
 akan ter-commit) lalu ganti query/nama tabel/struktur S3 key di bawah dengan milikmu
 sendiri. Helper (bronze_daily, bronze_master, sp_job, s3_daily, s3_weekly, s3_master)
 tidak perlu diubah -- itu murni mekanisme, bukan data.
+
+PENTING: exporter.py TIDAK membaca file ini langsung, tapi database job (jobs.db).
+File ini hanya untuk BOOTSTRAP environment baru (parity check otomatis):
+    python migrate_jobs.py
+Entri yang di-comment ikut diimpor sebagai job nonaktif. Setelah itu, tambah/ubah job lewat
+Web UI (halaman Daftar Job) -- bukan lewat file ini lagi.
 
 Field Job:
     name      : nama pendek (untuk --only & log). Harus unik.

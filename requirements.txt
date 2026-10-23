@@ -3,3 +3,7 @@ pyarrow
 python-dotenv
 boto3
 tzdata
+# Web UI (webapp/ + worker.py)
+fastapi
+uvicorn
+httpx

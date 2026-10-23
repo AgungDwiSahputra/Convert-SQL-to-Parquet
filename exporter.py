@@ -3,7 +3,8 @@
 Mesin ekspor SQL Server 2012 -> Parquet (multi-job, chunking, dataset AI/ML).
 
 File ini adalah KODE INTI. Kamu jarang perlu menyentuhnya.
-Daftar tabel/query yang mau diekspor ada di file terpisah: jobs.py
+Daftar tabel/query yang mau diekspor disimpan di database job (SQLite, lihat job_store.py),
+diisi dari jobs.py lewat: python migrate_jobs.py
 
 SQL Server 2012 tidak punya dukungan Parquet native. Pola:
     tarik data via pyodbc (streaming, fetchmany) -> tulis Parquet per-batch dengan ParquetWriter.
@@ -15,12 +16,12 @@ Schema = CAMPUR (auto default, manual kalau perlu):
   - Override manual per kolom lewat field 'overrides' di tiap Job (lihat jobs.py).
 
 Cara pakai:
-    python exporter.py                              # jalankan utk TARGET_DATE default (jobs.py)
+    python exporter.py                              # jalankan utk tanggal default (KEMARIN, kalender WIB)
     python exporter.py --date 2026-07-15             # jalankan utk 1 tanggal tertentu
     python exporter.py --start-date 2026-07-01 --end-date 2026-07-15   # jalankan utk range tanggal
     python exporter.py --only awl tmat               # hanya job tertentu (bisa digabung dgn tanggal di atas)
     python exporter.py --only "bronze_hms_*"         # wildcard: semua job yang namanya cocok pola (kutip di shell)
-    python exporter.py --list                        # lihat daftar job
+    python exporter.py --list                        # lihat daftar job (termasuk yang nonaktif)
     python exporter.py --stop-on-error
     python exporter.py --skip-s3                     # cuma simpan lokal, tidak upload ke S3
     python exporter.py --skip-local                  # cuma upload ke S3, tidak simpan ke folder output/ lokal
@@ -45,6 +46,7 @@ import io
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -57,7 +59,9 @@ from config import (
     CONN_STR, BATCH_SIZE, COMPRESSION, OUTPUT_DIR,
     AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET_NAME,
 )
-from jobs import JOBS, TARGET_DATE, build_jobs
+from job_store import (
+    JobStoreError, build_jobs, connect, default_target_date, init_db, load_job_rows, mark_s3_uploaded,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -111,23 +115,58 @@ def build_schema(cursor, overrides: dict) -> pa.Schema:
 # LOGIKA EKSPOR
 # ---------------------------------------------------------------------------
 
-# Log ke console DAN ke file sekaligus (dua handler) -- supaya wrapper .bat/scheduler
-# tidak perlu redirect/tee manual (redirect 2>&1 native exe di dalam PowerShell 5.1
-# malah membungkus tiap baris stderr jadi NativeCommandError, walau exit code 0).
-# Nama file pakai strftime Python (BUKAN %date%/%time% batch) supaya konsisten
-# lintas locale Windows -- %date% format-nya berubah tergantung Regional Settings.
-_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(_LOG_DIR, exist_ok=True)
-_LOG_FILE = os.path.join(_LOG_DIR, datetime.now().strftime("exporter_%Y%m%d_%H%M%S.log"))
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+LOG_DATEFMT = "%H:%M:%S"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler(_LOG_FILE, encoding="utf-8")],
-)
 log = logging.getLogger("parquet-export")
-log.info("Log run ini disimpan ke: %s", _LOG_FILE)
+
+
+def setup_logging(prefix: str = "exporter") -> str:
+    """
+    Log ke console DAN ke file logs/<prefix>_YYYYmmdd_HHMMSS.log sekaligus (dua handler) --
+    supaya wrapper .bat/scheduler tidak perlu redirect/tee manual (redirect 2>&1 native exe
+    di dalam PowerShell 5.1 malah membungkus tiap baris stderr jadi NativeCommandError, walau
+    exit code 0). Nama file pakai strftime Python (BUKAN %date%/%time% batch) supaya konsisten
+    lintas locale Windows.
+    Dipanggil dari main() / worker.py, BUKAN saat import -- supaya web app bisa meng-import
+    modul ini tanpa membuat file log baru.
+    """
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_file = os.path.join(LOG_DIR, datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S.log"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format=LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
+        handlers=[logging.StreamHandler(), logging.FileHandler(log_file, encoding="utf-8")],
+    )
+    log.info("Log run ini disimpan ke: %s", log_file)
+    return log_file
+
+
+@dataclass
+class JobResult:
+    """Hasil satu run_job() -- dicatat worker ke riwayat run (run_items)."""
+    rows: int
+    elapsed_s: float
+    size_bytes: int = 0
+    location: str | None = None   # path file lokal; None = hanya di memori / tidak ada resultset
+    s3_key: str | None = None     # terisi HANYA kalau benar-benar diupload
+
+
+def make_s3_client(skip_s3: bool):
+    """Klien boto3 S3, atau None kalau skip_s3 / kredensial .env belum lengkap (upload dilewati)."""
+    if skip_s3:
+        return None
+    if not (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and S3_BUCKET_NAME):
+        log.warning("Kredensial S3 belum lengkap di .env, upload S3 dilewati untuk semua job.")
+        return None
+    return boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
 
 
 def rows_to_table(rows: list, schema: pa.Schema, ingested_at: datetime | None = None) -> pa.Table:
@@ -184,7 +223,7 @@ def _advance_to_resultset_with_columns(cursor):
 
 
 def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_client=None,
-            date_suffix: str | None = None, skip_local: bool = False) -> int:
+            date_suffix: str | None = None, skip_local: bool = False) -> JobResult:
     started = datetime.now()
     tag = job.name if date_suffix is None else f"{job.name}@{date_suffix}"
 
@@ -218,7 +257,7 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     if not _advance_to_resultset_with_columns(cursor):
         log.warning("[%s] query tidak menghasilkan resultset berkolom (tidak ada data). Dilewati.",
                     tag)
-        return 0
+        return JobResult(rows=0, elapsed_s=(datetime.now() - started).total_seconds())
 
     schema = build_schema(cursor, job.overrides)
     data_field_names = [f.name for f in schema]  # kolom asli dari SQL Server, sebelum _ingested_at
@@ -248,16 +287,18 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
 
     elapsed = (datetime.now() - started).total_seconds()
     if use_local_file:
-        size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.exists(out_path) else 0
+        size_bytes = os.path.getsize(out_path) if os.path.exists(out_path) else 0
         location = out_path
     else:
-        size_mb = sink.getbuffer().nbytes / (1024 * 1024)
-        location = "(memori, tidak disimpan lokal)"
+        size_bytes = sink.getbuffer().nbytes
+        location = None
     log.info("[%s] SELESAI: %s baris -> %s (%.1f MB) dalam %.1fs",
-             tag, f"{total:,}", location, size_mb, elapsed)
+             tag, f"{total:,}", location or "(memori, tidak disimpan lokal)", size_bytes / (1024 * 1024),
+             elapsed)
     if job.labels:
         log.info("[%s] kolom label (target model): %s", tag, job.labels)
 
+    key = None
     if total > 0 and write_to_s3:
         key = job.s3_key(first_row)
         log.info("[%s] upload ke s3://%s/%s ...", tag, S3_BUCKET_NAME, key)
@@ -271,10 +312,11 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
         log.warning("[%s] punya s3_key tapi upload dilewati (--skip-s3 atau kredensial S3 belum lengkap).",
                     tag)
 
-    return total
+    return JobResult(rows=total, elapsed_s=elapsed, size_bytes=size_bytes, location=location, s3_key=key)
 
 
 def main() -> int:
+    setup_logging()
     p = argparse.ArgumentParser(description="Ekspor beberapa tabel SQL Server -> Parquet.")
     p.add_argument("--only", nargs="*", metavar="NAME",
                    help="jalankan hanya job yang cocok -- nama persis ATAU pola wildcard "
@@ -290,15 +332,30 @@ def main() -> int:
                    help="jangan simpan ke folder output/ lokal (langsung upload ke S3 dari memori); "
                         "job tanpa tujuan S3 tetap disimpan lokal")
     p.add_argument("--date", metavar="YYYY-MM-DD",
-                   help="jalankan untuk 1 tanggal tertentu (override TARGET_DATE di jobs.py)")
+                   help="jalankan untuk 1 tanggal tertentu (default: kemarin, kalender WIB)")
     p.add_argument("--start-date", metavar="YYYY-MM-DD", help="tanggal awal range (pakai bareng --end-date)")
     p.add_argument("--end-date", metavar="YYYY-MM-DD", help="tanggal akhir range, inklusif (pakai bareng --start-date)")
     args = p.parse_args()
 
+    # Daftar job dibaca SEKALI di awal run -- semua tanggal di mode range memakai snapshot yang sama.
+    # init_db dulu: skema database ikut dinaikkan walau web/worker belum pernah dijalankan di mesin ini.
+    try:
+        db = connect()
+        try:
+            init_db(db)
+        finally:
+            db.close()
+        all_rows = load_job_rows(enabled_only=False)
+    except JobStoreError as e:
+        log.error("%s", e)
+        return 1
+    job_rows = [r for r in all_rows if r.enabled]
+
     if args.list:
-        for j in JOBS:
+        for r, j in zip(all_rows, build_jobs(default_target_date(), all_rows)):
             s3_note = " (+ S3)" if j.s3_key else ""
-            print(f"  {j.name:<14} -> {j.output}{s3_note}")
+            off_note = "  [nonaktif]" if not r.enabled else ""
+            print(f"  {j.name:<14} -> {j.output}{s3_note}{off_note}")
         return 0
 
     if args.date and (args.start_date or args.end_date):
@@ -315,7 +372,7 @@ def main() -> int:
         elif args.date:
             start = end = datetime.strptime(args.date, "%Y-%m-%d").date()
         else:
-            start = end = datetime.strptime(TARGET_DATE, "%Y-%m-%d").date()
+            start = end = datetime.strptime(default_target_date(), "%Y-%m-%d").date()
     except ValueError as e:
         log.error("Format tanggal salah, pakai YYYY-MM-DD: %s", e)
         return 1
@@ -329,7 +386,7 @@ def main() -> int:
     # Validasi --only terhadap daftar nama job (tidak berubah antar-tanggal). Tiap item
     # boleh nama persis ATAU pola wildcard (job_matches, fnmatch: * dan ?) -- jadi satu
     # pola seperti 'bronze_hms_*' bisa mewakili banyak job sekaligus.
-    all_names = {j.name for j in JOBS}
+    all_names = {r.name for r in job_rows}
     wanted_patterns = args.only or None
     if wanted_patterns:
         matched_names = {n for n in all_names if job_matches(n, wanted_patterns)}
@@ -344,17 +401,7 @@ def main() -> int:
 
     comp = None if args.compression == "none" else args.compression
 
-    s3_client = None
-    if not args.skip_s3:
-        if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and S3_BUCKET_NAME:
-            s3_client = boto3.client(
-                "s3",
-                aws_access_key_id=AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-                region_name=AWS_REGION,
-            )
-        else:
-            log.warning("Kredensial S3 belum lengkap di .env, upload S3 dilewati untuk semua job.")
+    s3_client = make_s3_client(args.skip_s3)
 
     if is_range:
         log.info("Mode range: %s s/d %s (%d tanggal). Job master (tanpa @TargetDate) hanya dijalankan sekali.",
@@ -370,7 +417,7 @@ def main() -> int:
                 if stop_all:
                     break
                 date_str = d.strftime("%Y-%m-%d")
-                jobs_today = build_jobs(date_str)
+                jobs_today = build_jobs(date_str, job_rows)
                 if wanted_patterns:
                     jobs_today = [j for j in jobs_today if job_matches(j.name, wanted_patterns)]
                 for job in jobs_today:
@@ -378,7 +425,9 @@ def main() -> int:
                         continue
                     date_suffix = d.strftime("%Y%m%d") if (is_range and job.needs_date) else None
                     try:
-                        run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local)
+                        result = run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local)
+                        if result.s3_key:
+                            mark_s3_uploaded(job.name)  # path S3 sudah dipakai -> dikunci di Web UI
                         ok += 1
                         if not job.needs_date:
                             date_independent_done.add(job.name)

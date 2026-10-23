@@ -36,8 +36,50 @@ BATCH_SIZE = 100_000        # baris per fetch; turunkan bila memori terbatas
 COMPRESSION = "zstd"        # dataset AI/arsip: rasio bagus, decode cepat
 OUTPUT_DIR = "output"       # folder tujuan file .parquet (dibuat otomatis)
 
+# --- Daftar job (SQLite) ---
+# Dibuat/diisi oleh migrate_jobs.py, dibaca exporter.py (lihat job_store.py). Masuk
+# .gitignore -- isinya query/nama tabel/S3 key nyata milik environment ini.
+JOBS_DB = os.environ.get("JOBS_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db"))
+
 # --- Upload ke S3 (opsional per job, lihat s3_key di jobs.py) ---
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+# Segmen paling luar S3 key, DI ATAS layer. "" = bronze/silver/gold langsung di root
+# bucket. Mengubahnya memindahkan path SEMUA job -- jangan diubah tanpa alasan kuat.
+S3_PREFIX = os.environ.get("S3_PREFIX", "")
+
+# --- Web UI (webapp/) ---
+# Base URL SSO portal, mis. https://<host>/portalpage -- endpoint /api/auth/gettoken & /api/cor/user.
+SSO_BASE_URL = os.environ.get("SSO_BASE_URL", "").rstrip("/")
+# Lama session login Web UI (jam). Login ulang lewat SSO setelah habis.
+SESSION_HOURS = float(os.environ.get("SESSION_HOURS", "8"))
+# true kalau Web UI diakses lewat HTTPS -> cookie session hanya dikirim lewat HTTPS.
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes")
+# Alamat Web UI seperti dibuka user (dipakai untuk link di email notifikasi), mis. https://<server>/
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+
+# --- Email notifikasi (SMTP) ---
+# SEMUA nilai hanya dari environment/.env server -- tidak ada default yang berisi alamat/akun nyata.
+# SMTP_SECURITY: "starttls" (default), "ssl" (SMTPS, biasanya port 465), atau "none" (tanpa enkripsi).
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
+SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").strip().lower()
+SMTP_LOCAL_HOSTNAME = os.environ.get("SMTP_LOCAL_HOSTNAME", "") or None   # nama domain klien (EHLO)
+
+# --- Ekspor ad-hoc (download .parquet dari browser) ---
+ADHOC_MAX_ROWS = int(os.environ.get("ADHOC_MAX_ROWS", "500000"))
+
+# --- Log per run Web UI (logs/runs/run_<id>.log) ---
+# Nomor run berasal dari database: database lain (mis. salinan untuk uji) WAJIB memakai folder log
+# lain, kalau tidak log run-nya bercampur dengan run asli yang bernomor sama.
+RUN_LOG_DIR = os.environ.get("RUN_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "runs"))
+
+# --- Pemeliharaan harian (dijalankan worker.py) ---
+BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups"))
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "14"))                 # jumlah backup jobs.db yang disimpan
+LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "90"))   # umur maks log run & log worker

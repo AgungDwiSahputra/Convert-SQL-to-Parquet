@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/*
+ * Design token. Hex PERSIS dari palet produk -- palet bawaan Tailwind v4 memakai OKLCH yang
+ * sedikit berbeda (mis. emerald-500 bawaan != #10B981), jadi didefinisikan ulang di sini.
+ *   brand-500/600  aksi utama, status aktif, menu terpilih
+ *   brand-900/700  latar sidebar / hover di sidebar
+ *   brand-50/100   banner informasi (mint)       blue-50/100  latar ikon (soft blue)
+ *   gray-800       teks utama                     gray-500     teks sekunder
+ *   gray-100       latar halaman                  brand-200    teks menu non-aktif di sidebar
+ */
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-brand-50: #ecfdf5;
+  --color-brand-100: #d1fae5;
+  --color-brand-200: #a7f3d0;
+  --color-brand-300: #6ee7b7;
+  --color-brand-400: #34d399;
+  --color-brand-500: #10b981;
+  --color-brand-600: #059669;
+  --color-brand-700: #047857;
+  --color-brand-800: #065f46;
+  --color-brand-900: #064e3b;
+  --color-brand-950: #022c22;
+
+  --color-gray-50: #f9fafb;
+  --color-gray-100: #f3f4f6;
+  --color-gray-200: #e5e7eb;
+  --color-gray-300: #d1d5db;
+  --color-gray-400: #9ca3af;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #4b5563;
+  --color-gray-700: #374151;
+  --color-gray-800: #1f2937;
+  --color-gray-900: #111827;
+
+  --color-blue-50: #eff6ff;
+  --color-blue-100: #dbeafe;
+  --color-blue-200: #bfdbfe;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #1d4ed8;
+
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.06);
+  --shadow-raised: 0 4px 6px -2px rgb(16 24 40 / 0.05), 0 12px 24px -4px rgb(16 24 40 / 0.08);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    color-scheme: light;
+  }
+  body {
+    @apply bg-gray-100 text-gray-800;
+  }
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.6;
+  }
+  ::selection {
+    @apply bg-brand-100 text-brand-900;
+  }
+}

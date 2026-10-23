@@ -32,15 +32,24 @@ pip install -r requirements.txt
   template dengan helper (`bronze_daily`, `bronze_master`, `sp_job`, `s3_daily`, `s3_weekly`,
   `s3_master`) yang normalnya tidak perlu diubah — hanya isi `build_jobs()`-nya yang diganti
   per environment.
+- Jalankan `python migrate_jobs.py` → membuat **`jobs.db`** (SQLite, juga gitignored) dari
+  `jobs.py` — **sekali saja per environment** (bootstrap). **`exporter.py` membaca daftar job dari
+  `jobs.db`, bukan dari `jobs.py`.** Sejak Fase 2 job ditambah/diubah **lewat Web UI** (tercatat di
+  `job_history`); `migrate_jobs.py --replace` ditolak kalau sudah ada edit UI (kecuali
+  `--discard-ui-edits`). Migrasi menolak menulis kalau parity check gagal.
 
 Tidak ada test suite otomatis di proyek ini. Verifikasi perubahan lewat run manual, mis.
 `python exporter.py --date <tanggal> --skip-s3 --only <nama_job>` lalu cek file di `output/`.
+Perubahan di `job_templates.py` / `job_store.py` / `migrate_jobs.py` wajib lolos
+`python migrate_jobs.py --check` (bukti Job identik byte-per-byte dengan `jobs.py`).
 
 ## Commands
 
 ```powershell
-python exporter.py --list                                          # daftar job, tanpa eksekusi
-python exporter.py                                                  # jalan utk TARGET_DATE default (jobs.py)
+python migrate_jobs.py                                             # bootstrap jobs.db dari jobs.py (env baru)
+python migrate_jobs.py --check                                      # bandingkan jobs.db dgn jobs.py (parity)
+python exporter.py --list                                          # daftar job (termasuk nonaktif), tanpa eksekusi
+python exporter.py                                                  # jalan utk tanggal default (kemarin, WIB)
 python exporter.py --date 2026-07-20 --only awl ars                 # tanggal tertentu, job tertentu
 python exporter.py --only "bronze_hms_*" --skip-s3                  # wildcard: satu grup job (kutip di shell)
 python exporter.py --start-date 2026-07-01 --end-date 2026-07-15    # mode range
@@ -50,14 +59,32 @@ python exporter.py --skip-s3 -b 20000 -c snappy                     # ubah batch
 `run_exporter.bat` adalah wrapper untuk Windows Task Scheduler (auto-detect `python`/`py` di
 PATH, cd ke folder sendiri dulu) — menjalankan `--only "bronze_*" --skip-local` terjadwal.
 
+Web UI (Fase 1, detail di README.md §8) — dua proses terpisah + build frontend:
+
+```powershell
+cd frontend; npm install; npm run build; cd ..          # React+Tailwind -> frontend/dist
+python manage.py add-user <username.sso> --role admin    # admin pertama
+python -m uvicorn webapp.main:app --port 8000            # = run_web.bat
+python worker.py                                         # = run_worker.bat (eksekutor antrian run)
+```
+
 ## Arsitektur (ringkas — detail lengkap di README.md)
 
 | File | Peran | Kapan diedit |
 |---|---|---|
-| `jobs.py` | Daftar ekspor (gitignored, lihat di atas) | **Satu-satunya file yang normalnya perlu diedit** untuk menambah/mengubah ekspor |
+| `jobs.py` | Format lama daftar ekspor (gitignored) — hanya bootstrap env baru & arsip | Tidak lagi |
+| `jobs.db` | Daftar ekspor yang **dibaca exporter** (SQLite, gitignored): nama + template + args JSON + enabled + notes + kunci S3 | **Lewat Web UI** (Daftar Job → Tambah/Edit) |
+| `job_validation.py` | Aturan validasi job dari UI (identifier dicek ke SQL Server, keunikan folder S3, role template, kunci S3) | Saat aturan/template berubah |
+| `job_templates.py` | Template job (pindahan helper `jobs.py`) + penyusun S3 key. Generik, masuk Git | Saat butuh pola query baru |
+| `job_store.py` | Akses `jobs.db`, `build_jobs(target_date, rows)`, `default_target_date()` | Saat struktur tabel berubah |
+| `migrate_jobs.py` | Migrasi `jobs.py` → `jobs.db` via AST + parity check | Saat menambah template (`HELPER_TO_TEMPLATE`) |
 | `exporter.py` | Mesin eksekusi: CLI, koneksi, deteksi schema, batching, tulis parquet, upload S3 | Jarang — hanya kalau mekanismenya berubah |
 | `job.py` | `@dataclass Job` — struktur satu job | Hanya kalau menambah field baru ke `Job` |
-| `config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, kredensial dari `.env` | Saat setelan global berubah |
+| `config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, kredensial & setelan Web UI dari `.env` | Saat setelan global berubah |
+| `webapp/` | FastAPI: login SSO → session sendiri, API jobs/runs/users, sajikan `frontend/dist` | Fitur Web UI |
+| `run_store.py` / `worker.py` | Antrian & riwayat run (`runs`/`run_items` di `jobs.db`) / proses eksekutornya (+ thread scheduler, notifikasi, pemeliharaan) | Mekanisme eksekusi run UI |
+| `scheduler.py` / `notify.py` / `maintenance.py` / `app_settings.py` | Jadwal run otomatis (WIB) / email run gagal & anomali 0 baris / backup `jobs.db` & bersih log harian / setelan non-rahasia (tabel `settings`) | Fase 3 — README §10 |
+| `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite). Warna lewat token `brand-*`/`gray-*`/`blue-*` di `src/index.css` (palet hijau, mode terang) — jangan pakai warna Tailwind lain (indigo/slate/emerald) atau kelas `dark:` | Tampilan Web UI |
 
 Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di README.md §5):
 - **Nama file S3 konstan** (`part-00001.parquet`) — tiap job menulis data penuh per-partisi
@@ -69,3 +96,23 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - Placeholder parameter query pakai `?` (gaya qmark pyodbc), bukan `@param`.
 - `name`, `output`, dan hasil `s3_key` harus unik antar job — tabrakan bersifat senyap (saling
   menimpa file, tanpa error).
+- **`job_templates.py` masuk Git: jangan tulis nilai spesifik environment** (nama DB/SP, IP linked
+  server, nama tabel) di sana — jadikan argumen template; nilainya tersimpan per job di `jobs.db`.
+  Whitespace string query di template sengaja identik dengan helper lama (parity byte-per-byte).
+- Skema `jobs.db` berubah = TAMBAH elemen di `job_store._MIGRATIONS` (jangan ubah yang lama).
+  Koneksi web/worker lewat `run_store.open_db()` (autocommit, `check_same_thread=False` karena
+  FastAPI memakai threadpool; transaksi multi-statement lewat `_tx()` = `BEGIN IMMEDIATE`).
+- Di Windows `mimetypes` membaca registry (`.js` bisa jadi `text/plain` → halaman putih);
+  `webapp/main.py` mengunci MIME `.js/.css/.svg` secara eksplisit — jangan dihapus.
+- **Path S3 terkunci** (`jobs.s3_locked_at`, diisi saat upload pertama oleh CLI & worker) hanya boleh
+  dipindah admin + `confirm_s3_move`. Template baru = tambah juga di `job_validation.TEMPLATE_SPECS`
+  (role minimal) dan `TEMPLATE_FIELDS` di `frontend/src/lib/jobs.js`.
+- Parameter string pyodbc dikirim sebagai NVARCHAR → filter kolom VARCHAR tanpa `CAST(? AS VARCHAR(n))`
+  memindai seluruh tabel (terukur 70 dtk vs 0,2 dtk di tabel 64 jt baris). Jangan dihapus di template.
+- Metadata SQL Server: JANGAN join `sys.partitions` untuk semua tabel (40-60+ dtk di database besar);
+  hitung baris per tabel terpilih saja (`webapp/catalog.table_rows`).
+- **Kredensial (SMTP, SSO, SQL Server, AWS) hanya di `.env` server** — jangan pernah ditulis ke kode,
+  dokumen, database (`settings` hanya untuk nilai non-rahasia), atau ditampilkan di UI/API.
+- Ekspor ad-hoc Viewer **hanya dari job terdaftar** (keputusan keamanan: login exporter bisa membaca
+  tabel sensitif); tabel bebas khusus Operator/Admin. Jangan dilonggarkan tanpa persetujuan pemilik.
+- Saat menguji worker/jadwal, opsi run WAJIB `skip_s3: true` — default opsi run = upload ke S3 produksi.

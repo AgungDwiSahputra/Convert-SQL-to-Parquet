@@ -7,4 +7,12 @@ logs/
 # Gunakan jobs.py.example sbg template
 jobs.py
 
+# Database job (isi dari migrate_jobs.py) -- berisi query/tabel/S3 key nyata, sama seperti jobs.py
+jobs.db
+jobs.db.bak
+jobs.db-wal
+jobs.db-shm
+# Backup harian jobs.db (worker.py)
+backups/
+
 daftar_tabel_sumber.csv

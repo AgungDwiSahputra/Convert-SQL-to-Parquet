@@ -39,11 +39,47 @@ Tujuan akhirnya dataset untuk AI/ML, karena itu presisi angka dijaga ketat
 
 | File | Peran | Kapan diedit |
 |---|---|---|
-| `jobs.py` | **Daftar ekspor.** Satu entri = satu dataset. Berisi juga helper penyusun S3 key. | Setiap kali menambah/mengubah ekspor — **ini satu-satunya file yang normalnya perlu diedit** |
+| `jobs.db` | **Daftar ekspor** (SQLite, gitignored). Satu baris tabel `jobs` = satu dataset: nama + template + argumen JSON + aktif/nonaktif + catatan. **Inilah yang dibaca `exporter.py`.** | **Lewat Web UI** (halaman Daftar Job → Tambah/Edit) sejak Fase 2 — lihat bagian 9 |
+| `jobs.py` | Format lama daftar job (gitignored). Sejak Fase 2 hanya untuk **bootstrap** environment baru (`migrate_jobs.py`) & arsip. | Tidak lagi — `migrate_jobs.py --replace` ditolak kalau sudah ada edit lewat UI |
+| `job_validation.py` | Aturan validasi job dari Web UI: identifier dicek ke SQL Server, keunikan nama/output/folder S3, template khusus admin, kunci path S3. | Saat aturan berubah / template baru |
+| `job_templates.py` | **Template job** (pindahan helper `jobs.py`): `bronze_daily*`, `bronze_master`, `bronze_arcsde_view`, `sp_job`, `custom_sql` + penyusun S3 key `s3_daily`/`s3_weekly`/`s3_master`. Generik — masuk Git. | Saat butuh pola query baru |
+| `job_store.py` | Akses `jobs.db`: skema tabel, `load_job_rows()`, `build_jobs(target_date, rows)`, `default_target_date()`. | Saat struktur tabel berubah |
+| `migrate_jobs.py` | Migrasi `jobs.py` → `jobs.db` + **parity check** (lihat di bawah). | Saat menambah template baru (`HELPER_TO_TEMPLATE`) |
 | `exporter.py` | **Mesin eksekusi.** Argumen CLI, koneksi, deteksi schema, batching, tulis parquet, upload S3. | Jarang — hanya kalau mekanismenya berubah |
 | `job.py` | `@dataclass Job` — definisi struktur satu job (`job.py:10-23`). | Hanya kalau menambah field baru ke Job |
-| `config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, `OUTPUT_DIR`, kredensial AWS. Semua rahasia dibaca dari `.env` via `python-dotenv`. | Saat setelan global berubah |
+| `config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, `OUTPUT_DIR`, `JOBS_DB`, `S3_PREFIX`, kredensial AWS, setelan Web UI (`SSO_BASE_URL`, `SESSION_HOURS`, `COOKIE_SECURE`). Semua rahasia dibaca dari `.env` via `python-dotenv`. | Saat setelan global berubah |
 | `.env` | Kredensial nyata (tidak masuk Git). Contohnya di `.env.example`. | — |
+| `webapp/`, `worker.py`, `run_store.py`, `manage.py`, `frontend/` | **Web UI** (Fase 1) — lihat bagian 8. | — |
+
+### Daftar job: `jobs.py` → `jobs.db`
+
+```
+jobs.py ──(migrate_jobs.py: bedah AST + parity check)──▶ jobs.db ──(job_store.build_jobs)──▶ Job ──▶ exporter.py
+```
+
+- Kolom `template` = kunci `TEMPLATES` di `job_templates.py`; `args` = argumen template (JSON).
+  Semua nilai yang menentukan query/path S3 (db, layer, module, dataset, nama file, nama SP,
+  linked server) disimpan **eksplisit per job** — default helper lama ikut ditulis saat
+  migrasi, jadi mengubah default di template tidak diam-diam memindahkan path S3 job lama.
+- Satu-satunya setelan global yang ikut menentukan path S3: `S3_PREFIX` (`config.py`, dari `.env`).
+- Entri yang di-comment di `jobs.py` diimpor sebagai `enabled=0`. Komentar prosa tepat di atas
+  entri disimpan ke `notes` (komentar judul grup menempel ke job pertama grup itu).
+- **Parity check**: Job dari database dibandingkan dengan Job dari `build_jobs()` `jobs.py` asli
+  untuk beberapa tanggal uji (termasuk kabisat & pergantian tahun) — query, params, output,
+  overrides, labels, needs_date, S3 key, dan urutan job aktif harus identik byte-per-byte.
+  Job nonaktif dibandingkan dengan salinan `jobs.py` yang entri-nya di-uncomment. Ada beda →
+  database tidak ditulis (exit code 2).
+- `custom_sql.params` memakai `{"$var": "target_date"}` / `{"$var": "next_date"}` untuk nilai
+  tanggal. `overrides` disimpan sebagai teks `str(tipe)` (mis. `"decimal128(18, 4)"`) dan
+  dibaca lewat whitelist `parse_arrow_type()`, bukan objek pyarrow / eval.
+
+```powershell
+python migrate_jobs.py --dry-run   # analisis + parity saja, tanpa menulis
+python migrate_jobs.py             # isi jobs.db pertama kali (environment baru)
+python migrate_jobs.py --replace   # sinkron ulang dari jobs.py -- DITOLAK kalau sudah ada edit lewat Web UI
+                                   # (tambahkan --discard-ui-edits kalau memang mau membuang edit UI)
+python migrate_jobs.py --check     # bandingkan isi jobs.db dengan jobs.py (beda = wajar setelah edit UI)
+```
 
 Struktur `Job` (`job.py`):
 
@@ -65,12 +101,14 @@ Struktur `Job` (`job.py`):
 ### `main()` — `exporter.py:241`
 
 1. **Parse argumen** (`:243-257`).
-2. **`--list`** (`:259`): cetak daftar job dari konstanta `JOBS` lalu keluar. Perlu
-   diketahui: `JOBS` dibangun dari `TARGET_DATE` default, jadi `--list` tidak
-   memperhitungkan `--date`.
-3. **Validasi tanggal** (`:265-285`): `--date` dan `--start-date/--end-date` tidak
+2. **Baca daftar job** dari `jobs.db` SEKALI di awal run (`load_job_rows`) — semua tanggal di
+   mode range memakai snapshot yang sama. Database belum ada → error + exit `1`.
+   **`--list`**: cetak semua job (yang nonaktif ditandai `[nonaktif]`) lalu keluar. Job
+   dibangun untuk tanggal default, jadi `--list` tidak memperhitungkan `--date`.
+3. **Validasi tanggal**: `--date` dan `--start-date/--end-date` tidak
    boleh dipakai bersamaan; `--start-date` dan `--end-date` harus berpasangan;
-   `end >= start`. Tanpa opsi tanggal apa pun → pakai `TARGET_DATE` dari `jobs.py:93`.
+   `end >= start`. Tanpa opsi tanggal apa pun → `default_target_date()` (`job_store.py`):
+   kemarin menurut kalender WIB (dikunci `Asia/Jakarta`, bukan timezone OS).
 4. **Bangun `date_list`** (`:287`). `is_range = len(date_list) > 1`.
 5. **Validasi `--only`** (`:291-299`): nama tak dikenal hanya diperingatkan
    (warning) dan diabaikan; error hanya kalau **tidak ada satu pun** nama yang cocok.
@@ -79,8 +117,9 @@ Struktur `Job` (`job.py`):
    (hanya warning, proses tetap lanjut tanpa upload).
 7. **Satu koneksi pyodbc** dibuka untuk **seluruh** run (`:324`) — semua job, semua tanggal.
 8. **Loop tanggal → loop job** (`:325-347`):
-   - `build_jobs(date_str)` dipanggil ulang **per tanggal**, sehingga seluruh S3 key
-     dan `params` ikut menyesuaikan tanggal itu.
+   - `build_jobs(date_str, job_rows)` dipanggil ulang **per tanggal** (hanya job aktif),
+     sehingga seluruh S3 key dan `params` ikut menyesuaikan tanggal itu. `--only` hanya
+     bisa memilih job aktif — job nonaktif tidak ikut walau cocok pola wildcard.
    - Job master (`needs_date=False`) di mode range dilewati kalau sudah pernah jalan,
      dilacak lewat `date_independent_done` (`:333`).
    - `date_suffix` diisi **hanya** kalau `is_range and job.needs_date` (`:335`) — dipakai
@@ -177,7 +216,7 @@ row group kecil yang justru memperlambat pembacaan.
 ### `first_row` dan S3 key dinamis
 
 `s3_key` adalah **callable** yang menerima dict `{nama_kolom: nilai}` dari **baris
-pertama batch pertama**. Ini dipakai `s3_weekly` di `jobs.py:132` untuk mengambil
+pertama batch pertama**. Ini dipakai `s3_weekly` di `job_templates.py` untuk mengambil
 `week_year` / `week_month` / `week_of_month` langsung dari hasil query — batas minggu
 ditentukan tabel `dbo.T_PZO_Week_Temp` di SQL Server, jadi tidak boleh dihitung ulang
 di Python. Helper lain mengabaikan argumen ini (`lambda _first_row: key`).
@@ -196,8 +235,10 @@ python exporter.py --start-date 2026-07-01 --end-date 2026-07-15
 
 ## 5. Layout S3
 
-Konvensi ditentukan sepenuhnya oleh helper di `jobs.py`. Konstanta pengatur:
-`S3_PREFIX` (`:105`), `LAYER` (`:100`), `PART_FILE` (`:109`, sekarang `"part-00001.parquet"`).
+Konvensi ditentukan oleh penyusun S3 key di `job_templates.py` (`s3_daily`/`s3_weekly`/
+`s3_master`). `S3_PREFIX` global di `config.py` (dari `.env`, default `""`); `layer`, `module`,
+`dataset`, dan nama file disimpan per job di `jobs.db` (nama file default
+`DEFAULT_PART_FILE = "part-00001.parquet"`).
 
 Bucket produksi: `s3://<nama-bucket-s3-anda>/` (isi lewat `S3_BUCKET_NAME` di `.env`, lihat `config.py`). Path lengkap punya **segmen `source=`
 opsional** di antara `layer` dan `dataset`, mengikuti taksonomi sistem (mis. `ARS`,
@@ -257,13 +298,13 @@ dengan pola "ambil `MAX(snapshot_date)`", bukan di-scan per rentang.
 
 | Flag | Efek |
 |---|---|
-| *(tanpa opsi)* | Jalan untuk `TARGET_DATE` di `jobs.py:93` |
+| *(tanpa opsi)* | Jalan untuk tanggal default: kemarin (kalender WIB) |
 | `--date YYYY-MM-DD` | Satu tanggal tertentu |
 | `--start-date` + `--end-date` | Rentang tanggal, inklusif |
 | `--only NAMA…` | Batasi ke job tertentu -- tiap item boleh nama persis ATAU pola wildcard (`*`, `?`, lihat `job_matches()` di `exporter.py`), mis. `--only "bronze_hms_*"` untuk satu grup sekaligus |
 | `-b`, `--batch N` | Baris per fetch / per row group (default `100_000`) |
 | `-c`, `--compression` | `zstd` (default), `snappy`, `gzip`, `none` |
-| `--list` | Cetak daftar job lalu keluar |
+| `--list` | Cetak daftar job (termasuk yang nonaktif) lalu keluar |
 | `--stop-on-error` | Berhenti di kegagalan pertama |
 | `--skip-s3` | Simpan lokal saja |
 | `--skip-local` | Upload langsung dari memori; job tanpa tujuan S3 tetap disimpan lokal |
@@ -280,8 +321,10 @@ python exporter.py --date 2026-07-20 --skip-s3 -b 20000
 
 ## 7. Aturan saat memodifikasi
 
-1. **Tambah ekspor baru = tambah satu entri di `build_jobs()` pada `jobs.py`.** Jangan
-   sentuh `exporter.py`.
+1. **Tambah/ubah ekspor = lewat Web UI** (Daftar Job → Tambah Job / Edit), bukan lagi `jobs.py`.
+   Jangan sentuh `exporter.py`. Pola query yang belum ada = template baru di `job_templates.py`
+   + spesifikasinya di `job_validation.TEMPLATE_SPECS` (role minimal) + aturan validasinya +
+   `TEMPLATE_FIELDS` di `frontend/src/lib/jobs.js`.
 2. **Placeholder parameter pakai `?`, bukan `@param`.** pyodbc memakai gaya qmark;
    `params` harus berurutan sesuai posisi `?`.
 3. **`SET NOCOUNT ON;` wajib di awal query SP**, supaya pesan "N rows affected" tidak
@@ -292,8 +335,199 @@ python exporter.py --date 2026-07-20 --skip-s3 -b 20000
 5. **Jangan membuat `PART_FILE` dinamis** (timestamp, UUID, atau nomor berurut) selama
    tiap job masih mengembalikan data penuh per tanggal. Lihat poin 3 di bagian 5.
 6. **Kredensial hanya dari environment/`.env`.** Jangan pernah hard-code di `config.py`.
-7. **`overrides` memakai objek `pa.DataType`** (mis. `pa.decimal128(18, 4)`), dengan key
-   berupa nama kolom persis.
+7. **`overrides`** ditulis sebagai objek `pa.DataType` di `jobs.py` (mis. `pa.decimal128(18, 4)`)
+   dan tersimpan sebagai teks `str(tipe)` di `jobs.db`; key-nya nama kolom persis.
 8. Kalau menambah field ke `Job`, beri **default** di `job.py` agar job lama tidak rusak.
+9. **`job_templates.py` masuk Git — jangan tulis nilai spesifik environment di sana** (nama
+   database/SP, IP linked server, nama tabel); jadikan argumen template, nilainya tersimpan
+   per job di `jobs.db`. Whitespace string query di template sengaja sama persis dengan
+   helper lama — mengubahnya membuat parity check gagal.
 
 ---
+
+## 8. Web UI (Fase 1)
+
+Tim bisa menjalankan & memantau ekspor dari browser tanpa CLI. Tambah/ubah job lewat UI: bagian 9.
+
+```
+Browser (React) ──▶ webapp/ (FastAPI, :8000) ──▶ jobs.db (WAL) ◀── worker.py ──▶ SQL Server / S3
+                        │ login                       ▲ runs / run_items
+                        ▼                             │
+                  SSO portal (gettoken, cor/user)     logs/runs/run_<id>.log ──▶ log live di UI
+```
+
+| Komponen | Peran |
+|---|---|
+| `webapp/main.py` | App FastAPI: router `/api/...` + menyajikan `frontend/dist` (SPA). Dokumentasi API: `/api/docs` |
+| `webapp/routes_auth.py` | Login SSO → session aplikasi sendiri (cookie HttpOnly, hash sha256 di tabel `sessions`). Token SSO hanya dipakai sesaat saat login. Batas 5x gagal / 10 menit per (IP, username) |
+| `webapp/routes_runs.py` | Preview (rencana item + path S3 yang akan ditimpa), buat run, riwayat, detail, log (polling per offset), cancel, retry |
+| `webapp/routes_jobs.py`, `routes_schema.py`, `catalog.py` | Daftar/detail/tambah/ubah/uji coba job · penjelajah tabel SQL Server (bagian 9) |
+| `webapp/routes_users.py` | Kelola user (admin) |
+| `run_store.py` | Antrian & riwayat run di `jobs.db`. Klaim run pakai `BEGIN IMMEDIATE`; dua run yang memakai job yang sama tidak pernah jalan bersamaan |
+| `worker.py` | Proses terpisah: ambil run `queued`, eksekusi item satu per satu lewat `exporter.run_job()`, heartbeat tiap 15 detik. Run yang heartbeat-nya basi > 90 detik → `interrupted` |
+| `manage.py` | CLI kelola user (terutama admin pertama) |
+| `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite). `npm run build` → `frontend/dist`. Halaman: Beranda (ringkasan), Jalankan, Riwayat Run, Daftar Job, Users |
+| `frontend/src/index.css` | **Design token** (`@theme`): hijau `brand-*` (aksi utama `#059669`, sidebar `#064E3B`, menu aktif `#10B981`, banner mint `#ECFDF5`), teks `gray-800 #1F2937` / `gray-500 #6B7280`, latar `gray-100 #F3F4F6`, soft blue `blue-50` untuk ikon. Hex persis didefinisikan ulang karena palet bawaan Tailwind v4 (OKLCH) sedikit berbeda. Tampilan mode terang saja. Komponen dasar di `src/components/ui.jsx` |
+
+**Skema database v2** (`job_store._MIGRATIONS`, dijalankan otomatis saat web/worker/manage start):
+`users`, `sessions`, `runs`, `run_items` (menyimpan SNAPSHOT `template`+`args` job saat run dibuat —
+audit "dijalankan dengan definisi apa"), `workers` (indikator "Worker aktif" di UI).
+Struktur berubah = TAMBAH elemen baru di `_MIGRATIONS`, jangan ubah elemen lama.
+
+**Role**: `viewer` (lihat), `operator` (+ jalankan/batalkan/ulangi run), `admin` (+ kelola user).
+Login hanya untuk username yang terdaftar & aktif di tabel `users`. Dari profil SSO hanya nama
+lengkap & email yang disimpan — NIK / No. KTP di response `cor/user` diabaikan.
+
+**Semantik run = CLI**: job harian sekali per tanggal (file lokal bersufiks tanggal di mode range),
+job master sekali dengan snapshot tanggal awal (`run_store.plan_items`). Beda kecil: master yang
+gagal tidak dicoba ulang di tanggal berikutnya — pakai "Ulangi yang belum berhasil" (memakai
+definisi job TERBARU). Cancel saat running = job yang sedang jalan diselesaikan, sisanya dibatalkan.
+Default opsi sama dengan `run_exporter.bat`: upload S3 ya, simpan lokal tidak.
+
+### Menjalankan
+
+```powershell
+pip install -r requirements.txt
+cd frontend; npm install; npm run build; cd ..       # sekali, dan setiap frontend berubah
+python manage.py add-user <username.sso> --role admin  # admin pertama (sekali)
+run_web.bat        # atau: python -m uvicorn webapp.main:app --host 0.0.0.0 --port 8000
+run_worker.bat     # atau: python worker.py   (proses kedua, SATU instance per server)
+```
+
+Pengembangan frontend: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
+(Vite :5173 mem-proxy `/api` ke :8000).
+
+### Deploy ke server (Windows)
+
+1. Server butuh akses jaringan ke SQL Server, S3, dan SSO portal; ODBC Driver 17 terpasang.
+2. `.env`: kredensial seperti biasa + `SSO_BASE_URL`; `COOKIE_SECURE=true` kalau diakses lewat HTTPS.
+3. `python migrate_jobs.py` (buat `jobs.db` di server) → `python manage.py add-user ... --role admin`.
+4. `frontend/dist` tidak masuk Git: build di server (perlu Node.js) atau salin hasil build dari PC dev.
+5. Jalankan `run_web.bat` dan `run_worker.bat` sebagai service yang otomatis start saat boot
+   (mis. NSSM, atau Task Scheduler "At startup" + "Run whether user is logged on or not").
+6. Buka port web di firewall. Disarankan HTTPS lewat reverse proxy (IIS/nginx) di depan uvicorn —
+   lihat bagian 10 untuk detailnya.
+
+**Catatan**: jadwal `run_exporter.bat` di Task Scheduler tetap berjalan terpisah dan TIDAK tercatat di
+riwayat Web UI (dipindah ke dalam aplikasi di Fase 3). Hindari menjalankan job yang sama dari UI
+pada jam jadwal CLI — keduanya menimpa file/partisi S3 yang sama.
+
+## 9. Kelola job lewat Web UI (Fase 2)
+
+Daftar job sekarang diedit lewat Web UI — `jobs.db` adalah sumber kebenaran, `jobs.py` hanya
+arsip/bootstrap. Setiap perubahan tercatat di tabel `job_history` (siapa, kapan, sebelum/sesudah).
+
+**Hak akses**: Viewer hanya melihat. Operator & Admin bisa tambah/ubah/aktif-nonaktif job bronze
+(`bronze_daily*`, `bronze_master`, `bronze_daily_join`). Template `sp_job` (menjalankan ETL Load =
+MENULIS ke SQL Server), `bronze_arcsde_view` (linked server), dan `custom_sql` khusus Admin
+(`job_validation.TEMPLATE_SPECS`).
+
+**Wizard tambah job** (`frontend/src/pages/JobFormPage.jsx`):
+1. Pilih database & tabel dari SQL Server (`/api/schema/*`, hanya metadata, cache 2 menit).
+2. Jenis data: Harian / Master / Harian via JOIN. Untuk harian, template **dipilih otomatis dari
+   tipe & isi kolom tanggal** (`webapp/catalog.detect_date_format`, minimal 75% contoh cocok):
+   datetime → `bronze_daily`; teks `YYYY-MM-DD` → `bronze_daily_strdate` (rentang); teks format
+   lain (mis. `DD.MM.YYYY`) → `bronze_daily_strdate_eq` (kesetaraan); bigint 13 digit →
+   `bronze_daily_epoch_ms`. Format tak dikenal → tidak bisa disimpan.
+3. Modul/dataset/nama/file disarankan otomatis dari nama tabel; path S3 tampil live.
+4. **Uji coba** (`/api/jobs/test-run`): `SET ROWCOUNT n` + transaksi yang SELALU di-rollback +
+   query timeout 90 detik + maks 2 bersamaan. Tidak menulis file / upload. Override tipe kolom
+   bisa dipilih langsung dari hasil schema.
+5. Simpan — default **nonaktif**; "Aktifkan sekarang" hanya bisa kalau uji coba berhasil untuk
+   isian yang sama. Job aktif bernama `bronze_*` otomatis ikut jadwal `run_exporter.bat`.
+
+**Aturan yang dijaga sistem** (`job_validation.validate_job`, dipanggil live & saat simpan):
+- Identifier (db/tabel/kolom/alias) harus identifier SQL biasa, bukan kata kunci T-SQL, DAN ada
+  di SQL Server — template merangkai query dengan f-string, jadi ini yang mencegah injeksi SQL.
+- Nama job, file output, dan **folder dataset S3** unik antar job (dua job satu folder = terbaca
+  satu tabel di Athena/Glue walau nama file beda).
+- **Kunci path S3** (`jobs.s3_locked_at`): terisi saat upload S3 pertama berhasil (CLI & worker,
+  `job_store.mark_s3_uploaded`); job hasil impor jobs.py langsung terkunci. Path terkunci hanya
+  boleh dipindah Admin dengan konfirmasi eksplisit (`confirm_s3_move`) — data lama tertinggal di
+  path lama, kunci dilepas sampai upload berikutnya.
+- Nama job tidak bisa diubah setelah dibuat (dipakai riwayat run & `--only`).
+
+**Temuan performa** (`bronze_daily_strdate_eq`): pyodbc mengirim `str` sebagai NVARCHAR; dibanding
+kolom VARCHAR, SQL Server mengonversi SELURUH kolom → index tidak terpakai. Terukur di tabel feed
+SAP 64 jt baris: 70 detik vs 0,2 detik dengan `CAST(? AS VARCHAR(32))`, hasil sama. Template lama
+`bronze_daily_strdate` tidak diubah (parity) — untuk tabel feed SAP pakai wizard (format
+`DD.MM.YYYY` terdeteksi → `strdate_eq`).
+
+**Skema database v3**: kolom `jobs.s3_locked_at`, `jobs.updated_by`, tabel `job_history`. Migrasi
+otomatis saat web/worker/CLI start (CLI juga menjalankan `init_db`, supaya pencatatan kunci S3 tidak
+gagal di mesin yang belum pernah menjalankan web).
+
+## 10. Operasional (Fase 3)
+
+### Jadwal — `scheduler.py` (halaman **Jadwal**)
+
+Jadwal = jam (WIB) harian/mingguan + cakupan job (pola nama seperti `bronze_*` / modul / daftar job)
++ opsi run. Thread scheduler di dalam `worker.py` (tiap 20 detik) mengubah jadwal yang jatuh tempo
+menjadi **run biasa** di antrian — tercatat di Riwayat Run atas nama `jadwal:<nama>`.
+- Tanggal data = tanggal kalender WIB **saat jadwal** − `date_offset` (bukan jam tembak), jadi run yang
+  terlambat tetap memproses tanggal yang benar. Kejadian yang terlewat berhari-hari hanya ditembak
+  SEKALI (yang terakhir) — sisanya backfill manual.
+- Klaim jadwal di `BEGIN IMMEDIATE` → tidak ada tembakan dobel walau worker lebih dari satu.
+- Cakupan dievaluasi saat ditembak → job baru yang cocok pola otomatis ikut.
+- Jadwal baru **default nonaktif**. Selama `run_exporter.bat` di Task Scheduler masih aktif, jangan
+  aktifkan jadwal yang mencakup job yang sama (ekspor dobel). Peralihan: buat jadwal → matikan task
+  lama → aktifkan jadwal.
+
+### Notifikasi email — `notify.py` (halaman **Pengaturan**, admin)
+
+| Kejadian | Isi | Penerima |
+|---|---|---|
+| Run gagal / terputus | Daftar eksekusi gagal + error + link run | Penerima tetap + pembuat run (run manual) |
+| Anomali 0 baris | Job yang pernah berisi data, tapi N tanggal terakhir (default 3) 0 baris — **sekali per kejadian**, baru dikirim lagi setelah job sempat berisi data | Sama |
+| Uji | Tombol "Kirim email uji" | Alamat yang diisi |
+
+Setelan penerima & saklar disimpan di tabel `settings` (non-rahasia). **Akun SMTP hanya di `.env`**
+(`SMTP_HOST/PORT/USER/PASSWORD/FROM/SECURITY`, `SMTP_SECURITY` = `starttls` | `ssl` | `none`) —
+tidak ditampilkan di UI dan tidak tersimpan di database. Isi juga `APP_BASE_URL` supaya email
+berisi link. Gagal kirim tidak memengaruhi run; semua percobaan tercatat di tabel `notifications`.
+
+### Ekspor Cepat — `webapp/routes_adhoc.py` (halaman **Ekspor Cepat**)
+
+Download `.parquet` dari browser tanpa membuat job dan tanpa menyentuh S3 (skema sama dengan file
+datalake, termasuk `_ingested_at`). Maks `ADHOC_MAX_ROWS` baris (default 500.000); transaksi di-rollback.
+- **Viewer**: hanya dari **job terdaftar & aktif** + tanggal — tabel sensitif yang tidak dijadikan job
+  tidak bisa diambil. Job bertemplate khusus admin (mis. `sp_job` yang menjalankan ETL) hanya admin.
+- **Operator/Admin**: juga **tabel bebas** (opsional filter kolom datetime), divalidasi aturan wizard.
+- Setiap unduhan tercatat di tabel `adhoc_exports` (siapa, apa, berapa baris).
+
+### Pemeliharaan harian — `maintenance.py`
+
+Sekali per hari (WIB) oleh worker: backup `jobs.db` ke `BACKUP_DIR` (default `backups/`, simpan
+`BACKUP_KEEP` = 14 terakhir), hapus `logs/runs/*.log` & `logs/worker_*.log` > `LOG_RETENTION_DAYS`
+(90) hari, hapus session kedaluwarsa. Log CLI `logs/exporter_*.log` tidak disentuh. Restore backup:
+hentikan web & worker → salin `backups/jobs_YYYYMMDD_HHMMSS.db` menjadi `jobs.db` → jalankan lagi.
+
+**Skema v4**: tabel `schedules`, `settings`, `notifications`, `adhoc_exports`, kolom `runs.schedule_id`.
+
+### Menjalankan permanen di server Windows
+
+Web (`run_web.bat`) dan worker (`run_worker.bat`) harus hidup terus dan otomatis start saat boot.
+
+**Opsi A — NSSM** (service Windows sungguhan, restart otomatis kalau crash; unduh nssm.exe):
+```powershell
+nssm install ParquetExporterWeb    "D:\path\LoadParquetProcess\run_web.bat"
+nssm set     ParquetExporterWeb    AppDirectory "D:\path\LoadParquetProcess"
+nssm install ParquetExporterWorker "D:\path\LoadParquetProcess\run_worker.bat"
+nssm set     ParquetExporterWorker AppDirectory "D:\path\LoadParquetProcess"
+nssm start ParquetExporterWeb; nssm start ParquetExporterWorker
+```
+
+**Opsi B — Task Scheduler** (bawaan Windows, jalankan PowerShell sebagai Administrator):
+```powershell
+schtasks /Create /TN "ParquetExporter\Web"    /TR "\"D:\path\LoadParquetProcess\run_web.bat\""    /SC ONSTART /RU SYSTEM /RL HIGHEST
+schtasks /Create /TN "ParquetExporter\Worker" /TR "\"D:\path\LoadParquetProcess\run_worker.bat\"" /SC ONSTART /RU SYSTEM /RL HIGHEST
+```
+(Task Scheduler tidak me-restart proses yang crash — pantau `/api/health`.)
+
+**HTTPS**: pasang reverse proxy (IIS URL Rewrite + ARR, atau nginx) di depan uvicorn, jalankan web
+dengan `WEB_HOST=127.0.0.1` (hanya proxy yang bisa mengakses langsung), set `COOKIE_SECURE=true`
+dan `APP_BASE_URL=https://…`. uvicorn otomatis memakai header `X-Forwarded-*` dari 127.0.0.1, jadi IP
+klien untuk batas percobaan login tetap benar.
+
+**Monitoring**: `GET /api/health` (tanpa login) → `{"ok": true, "worker_online": true}`; HTTP 503
+kalau database tidak bisa dibuka. `worker_online: false` = worker mati → run & jadwal tertahan.
