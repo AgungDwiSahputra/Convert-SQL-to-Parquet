@@ -21,3 +21,9 @@ class Job:
     # False = job tidak tergantung tanggal (data master). Dipakai exporter.py untuk
     # memutuskan job ini cukup dijalankan sekali walau diberi range banyak tanggal.
     needs_date: bool = True
+    # Data quality (pipeline/dq.py), diisi template bronze. None = pemeriksaan itu dilewati.
+    # count_query: hitung baris sumber dengan filter IDENTIK (parameternya = params).
+    count_query: Optional[str] = None
+    # date_check: kolom tanggal hasil harus di dalam target_date --
+    # {"column": c, "min": v, "max_excl": v} (rentang) atau {"column": c, "equals": v}.
+    date_check: Optional[dict] = None

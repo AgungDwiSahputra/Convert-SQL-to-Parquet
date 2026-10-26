@@ -10,6 +10,9 @@ Schema = CAMPUR (auto default, manual kalau perlu):
   - decimal/numeric -> decimal128(p,s) (presisi terjaga, BUKAN float).
   - datetime/datetime2 -> timestamp[us]; bit -> boolean; uniqueidentifier -> string.
   - Override manual per kolom lewat field 'overrides' di tiap Job (disimpan per job di jobs.db).
+
+Data quality: run_job() memeriksa hasil SETELAH Parquet ditulis dan SEBELUM upload (pipeline/dq.py);
+pemeriksaan berat yang gagal -> DQBlocked, upload ditahan.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import pyodbc
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pipeline import dq
 from pipeline.config import (
     AWS_ACCESS_KEY_ID, AWS_REGION, AWS_SECRET_ACCESS_KEY, LOG_DIR, OUTPUT_DIR, S3_BUCKET_NAME,
 )
@@ -117,6 +121,7 @@ class JobResult:
     size_bytes: int = 0
     location: str | None = None   # path file lokal; None = hanya di memori / tidak ada resultset
     s3_key: str | None = None     # terisi HANYA kalau benar-benar diupload
+    dq: dq.DQReport | None = None  # hasil pemeriksaan data quality (None = tidak diaudit)
 
 
 def make_s3_client(skip_s3: bool):
@@ -179,7 +184,12 @@ def advance_to_resultset_with_columns(cursor):
 
 
 def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_client=None,
-            date_suffix: str | None = None, skip_local: bool = False) -> JobResult:
+            date_suffix: str | None = None, skip_local: bool = False,
+            audit: dq.AuditContext | None = None) -> JobResult:
+    """
+    Ekspor satu job. audit diisi (CLI & worker) -> data quality diperiksa sebelum upload; pemeriksaan
+    berat gagal -> dq.DQBlocked (upload ditahan, file lokal -- kalau ada -- tetap ditinggal untuk diperiksa).
+    """
     started = datetime.now()
     tag = job.name if date_suffix is None else f"{job.name}@{date_suffix}"
 
@@ -199,6 +209,9 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     if skip_local and use_local_file and not write_to_s3:
         log.warning("[%s] --skip-local diminta tapi job ini tidak ada tujuan S3 (s3_key kosong / S3 nonaktif) -- "
                     "tetap disimpan lokal.", tag)
+
+    # Hitung sumber TEPAT SEBELUM ekstraksi, di koneksi yang sama -> pembanding seadil mungkin.
+    source_rows, source_error = dq.count_source(conn, job) if audit else (None, None)
 
     log.info("[%s] menjalankan query...", tag)
 
@@ -222,6 +235,8 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     ingested_at = datetime.now(timezone.utc)
     schema = schema.append(pa.field("_ingested_at", pa.timestamp("us", tz="UTC")))
     log.info("[%s] schema: %s", tag, ", ".join(f"{f.name}:{f.type}" for f in schema))
+    date_idx = dq.date_column_index(data_field_names, job.date_check) if audit else None
+    date_mm = dq.MinMax() if date_idx is not None else None
 
     total = 0
     first_row = None
@@ -234,7 +249,10 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
                 break
             if first_row is None:
                 first_row = dict(zip(data_field_names, rows[0]))
-            writer.write_table(rows_to_table(rows, schema, ingested_at))
+            table = rows_to_table(rows, schema, ingested_at)
+            if date_mm:
+                date_mm.update(table.column(date_idx))
+            writer.write_table(table)
             total += len(rows)
             log.info("[%s]   +%s baris (total %s)", tag, f"{len(rows):,}", f"{total:,}")
     finally:
@@ -254,6 +272,15 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     if job.labels:
         log.info("[%s] kolom label (target model): %s", tag, job.labels)
 
+    report = None
+    if audit:
+        report = dq.audit(job, audit, source_rows, source_error, total, schema, date_idx is not None, date_mm)
+        log.log(logging.WARNING if report.status in (dq.WARNING, dq.BLOCKED) else logging.INFO,
+                "[%s] DQ %s: %s", tag, report.status.upper(),
+                report.summary((dq.OK, dq.WARNING, dq.BLOCKED)) or "tidak ada pemeriksaan untuk job ini")
+        if report.status == dq.BLOCKED:
+            raise dq.DQBlocked(report)
+
     key = None
     if total > 0 and write_to_s3:
         key = job.s3_key(first_row)
@@ -268,4 +295,5 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
         log.warning("[%s] punya s3_key tapi upload dilewati (--skip-s3 atau kredensial S3 belum lengkap).",
                     tag)
 
-    return JobResult(rows=total, elapsed_s=elapsed, size_bytes=size_bytes, location=location, s3_key=key)
+    return JobResult(rows=total, elapsed_s=elapsed, size_bytes=size_bytes, location=location, s3_key=key,
+                     dq=report)

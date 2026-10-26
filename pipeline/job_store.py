@@ -204,6 +204,14 @@ CREATE TABLE IF NOT EXISTS adhoc_exports (
     """
 ALTER TABLE notifications ADD COLUMN detail TEXT;
 """,
+    # v6 -- data quality Bronze (pipeline/dq.py)
+    """
+ALTER TABLE jobs ADD COLUMN schema_json TEXT;          -- skema terakhir yang DIPUBLIKASIKAN (acuan DQ)
+ALTER TABLE jobs ADD COLUMN schema_updated_at TEXT;
+ALTER TABLE run_items ADD COLUMN source_rows INTEGER;  -- COUNT sumber dengan filter yang sama
+ALTER TABLE run_items ADD COLUMN dq_status TEXT;       -- ok|warning|blocked|unchecked (NULL = sebelum v6)
+ALTER TABLE run_items ADD COLUMN dq_detail TEXT;       -- JSON daftar pemeriksaan
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -381,11 +389,15 @@ def update_job(conn: sqlite3.Connection, old: JobRow, new: JobRow, by: str, s3_m
     """
     Simpan perubahan template/args/notes. s3_moved=True (admin sudah konfirmasi pindah path S3)
     -> kunci S3 dilepas: path BARU belum pernah dipakai, terkunci lagi saat upload pertama.
+    Template/args berubah -> skema acuan DQ dilepas (perubahan disengaja; run berikutnya jadi acuan).
     """
+    definition_changed = new.template != old.template or new.args != old.args
     with write_tx(conn):
         conn.execute("UPDATE jobs SET template = ?, args = ?, notes = ?, updated_at = ?, updated_by = ?, "
-                     "s3_locked_at = CASE WHEN ? THEN NULL ELSE s3_locked_at END WHERE name = ?",
-                     (new.template, _dumps(new.args), new.notes, utc_now(), by, int(s3_moved), old.name))
+                     "s3_locked_at = CASE WHEN ? THEN NULL ELSE s3_locked_at END, "
+                     "schema_json = CASE WHEN ? THEN NULL ELSE schema_json END WHERE name = ?",
+                     (new.template, _dumps(new.args), new.notes, utc_now(), by, int(s3_moved),
+                      int(definition_changed), old.name))
         _history(conn, old.name, "s3_move" if s3_moved else "update", by, old.snapshot(),
                  {**new.snapshot(), "enabled": old.enabled})
 
@@ -411,6 +423,40 @@ def mark_s3_uploaded(name: str, conn: sqlite3.Connection | None = None) -> bool:
         if own:
             conn.commit()
         return True
+    except (sqlite3.Error, JobStoreError):
+        return False
+    finally:
+        if own and conn is not None:
+            conn.close()
+
+
+def get_schema_baseline(name: str, conn: sqlite3.Connection | None = None) -> list | None:
+    """Skema acuan DQ job (jobs.schema_json). None = belum ada / tidak terbaca (run berikutnya jadi acuan)."""
+    own = conn is None
+    try:
+        conn = conn or connect()
+        r = conn.execute("SELECT schema_json FROM jobs WHERE name = ?", (name,)).fetchone()
+        return json.loads(r[0]) if r and r[0] else None
+    except (sqlite3.Error, JobStoreError, ValueError):
+        return None
+    finally:
+        if own and conn is not None:
+            conn.close()
+
+
+def save_schema_baseline(name: str, schema: list | None, conn: sqlite3.Connection | None = None) -> bool:
+    """
+    Simpan skema acuan DQ (schema=None -> lepas acuan, lihat `manage.py accept-schema`). Sama seperti
+    mark_s3_uploaded: gagal mencatat tidak boleh menggagalkan job yang sudah sukses -> return False.
+    """
+    own = conn is None
+    try:
+        conn = conn or connect()
+        cur = conn.execute("UPDATE jobs SET schema_json = ?, schema_updated_at = ? WHERE name = ?",
+                           (_dumps(schema) if schema is not None else None, utc_now(), name))
+        if own:
+            conn.commit()
+        return cur.rowcount > 0
     except (sqlite3.Error, JobStoreError):
         return False
     finally:

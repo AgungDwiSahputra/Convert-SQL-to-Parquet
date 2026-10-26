@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtBytes, fmtDate, fmtDateRange, fmtDateTime, fmtDuration, fmtNumber, runElapsed, fmtCreator } from '../lib/format'
 import {
-  ACTIVE_STATUSES, Alert, Button, Card, FINAL_STATUSES, LoadingBlock, Modal, ProgressBar, Stat, StatusBadge,
+  ACTIVE_STATUSES, Alert, Button, Card, DqBadge, FINAL_STATUSES, LoadingBlock, Modal, ProgressBar, Stat, StatusBadge,
 } from '../components/ui'
 
 const MAX_LOG_CHARS = 400_000
@@ -110,6 +110,25 @@ function Destination({ item, bucket }) {
   }
   if (item.location) return <span className="truncate font-mono text-xs text-gray-500" title={item.location}>{item.location}</span>
   return <span className="text-gray-400">–</span>
+}
+
+// Data quality item (pipeline/dq.py). Ditahan: alasannya sudah tampil sebagai error item; peringatan
+// ditulis di bawah badge; rincian semua pemeriksaan ada di tooltip.
+function DqCell({ item }) {
+  if (!item.dq_status) return <span className="text-gray-400">–</span>
+  const checks = item.dq_detail || []
+  const title = [
+    ...checks.map((c) => `${c.name}: ${c.message}`),
+    ...(item.source_rows != null ? [`baris di sumber: ${fmtNumber(item.source_rows)}`] : []),
+  ].join('\n')
+  return (
+    <div className="space-y-1" title={title}>
+      <DqBadge status={item.dq_status} />
+      {checks.filter((c) => c.status === 'warning').map((c) => (
+        <p key={c.name} className="max-w-xs break-words text-xs text-amber-700">{c.message}</p>
+      ))}
+    </div>
+  )
 }
 
 const ITEM_FILTERS = [
@@ -270,6 +289,7 @@ export default function RunDetailPage() {
                 <span>{fmtBytes(i.size_bytes)}</span>
                 <span>{fmtDuration(i.elapsed_s)}</span>
               </div>
+              {i.dq_status && <DqCell item={i} />}
               {i.error && <p className="break-words font-mono text-xs text-red-600">{i.error}</p>}
               {(i.s3_key || i.location) && <Destination item={i} bucket={meta?.s3_bucket} />}
             </li>
@@ -283,6 +303,7 @@ export default function RunDetailPage() {
                 <th className="px-4 py-2.5">Job</th>
                 <th className="px-4 py-2.5">Tanggal</th>
                 <th className="px-4 py-2.5">Status</th>
+                <th className="px-4 py-2.5">DQ</th>
                 <th className="px-4 py-2.5 text-right">Baris</th>
                 <th className="px-4 py-2.5 text-right">Ukuran</th>
                 <th className="px-4 py-2.5 text-right">Durasi</th>
@@ -299,6 +320,7 @@ export default function RunDetailPage() {
                   </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-gray-600">{fmtDate(i.target_date)}</td>
                   <td className="px-4 py-2.5"><StatusBadge status={i.status} /></td>
+                  <td className="px-4 py-2.5"><DqCell item={i} /></td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtNumber(i.rows)}</td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtBytes(i.size_bytes)}</td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtDuration(i.elapsed_s)}</td>

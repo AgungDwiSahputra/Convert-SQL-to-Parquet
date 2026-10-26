@@ -181,8 +181,9 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
     if row is None or row["id"] is None:
         return None
     run = _run_dict(row)
-    run["items"] = [dict(i, args=json.loads(i["args"])) for i in conn.execute(
-        "SELECT * FROM run_items WHERE run_id = ? ORDER BY seq", (run_id,))]
+    run["items"] = [dict(i, args=json.loads(i["args"]),
+                         dq_detail=json.loads(i["dq_detail"]) if i["dq_detail"] else None)
+                    for i in conn.execute("SELECT * FROM run_items WHERE run_id = ? ORDER BY seq", (run_id,))]
     return run
 
 
@@ -280,14 +281,19 @@ def start_item(conn: sqlite3.Connection, item_id: int) -> None:
     conn.execute("UPDATE run_items SET status = 'running', started_at = ? WHERE id = ?", (utc_now(), item_id))
 
 
-def finish_item(conn: sqlite3.Connection, item_id: int, status: str, result=None, error: str | None = None) -> None:
-    """result = export.JobResult (untuk status 'success')."""
+def finish_item(conn: sqlite3.Connection, item_id: int, status: str, result=None, error: str | None = None,
+                dq_report=None) -> None:
+    """result = export.JobResult (status 'success'); dq_report = dq.DQReport (default: result.dq; item
+    yang ditahan DQ mengirimnya terpisah karena tidak punya result)."""
+    report = dq_report or getattr(result, "dq", None)
     conn.execute(
         "UPDATE run_items SET status = ?, rows = ?, size_bytes = ?, location = ?, s3_key = ?, elapsed_s = ?, "
-        "error = ?, finished_at = ? WHERE id = ?",
+        "error = ?, finished_at = ?, source_rows = ?, dq_status = ?, dq_detail = ? WHERE id = ?",
         (status, getattr(result, "rows", None), getattr(result, "size_bytes", None),
          getattr(result, "location", None), getattr(result, "s3_key", None),
-         getattr(result, "elapsed_s", None), error, utc_now(), item_id))
+         getattr(result, "elapsed_s", None), error, utc_now(),
+         report.source_rows if report else None, report.status if report else None,
+         report.to_json() if report else None, item_id))
 
 
 def close_open_items(conn: sqlite3.Connection, run_id: int, status: str) -> int:

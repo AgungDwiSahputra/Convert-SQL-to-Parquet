@@ -91,6 +91,7 @@ Semua path default (`output/`, `logs/`, `jobs.db`, `backups/`) relatif ke folder
 | `pipeline/job_templates.py` | Template job (pindahan helper `jobs.py`) + penyusun S3 key. Generik, masuk Git | Saat butuh pola query baru |
 | `pipeline/job_store.py` | Akses `jobs.db`, `build_jobs(target_date, rows)`, `default_target_date()` | Saat struktur tabel berubah |
 | `pipeline/job.py` | `@dataclass Job` — struktur satu job | Hanya kalau menambah field baru ke `Job` |
+| `pipeline/dq.py` | Data quality Bronze: jumlah baris, skema, rentang tanggal — diperiksa di `run_job()` antara tulis & upload | Saat aturan DQ berubah |
 | `pipeline/config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, path, kredensial & setelan Web UI dari `.env` | Saat setelan global berubah |
 | `webapp/` | FastAPI: login SSO → session sendiri, API jobs/runs/users, sajikan `frontend/dist` | Fitur Web UI |
 | `pipeline/run_store.py` / `worker.py` | Antrian & riwayat run (`runs`/`run_items` di `jobs.db`) / proses eksekutornya (+ thread scheduler, notifikasi, pemeliharaan) | Mekanisme eksekusi run UI |
@@ -131,6 +132,10 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - Ekspor ad-hoc Viewer **hanya dari job terdaftar** (keputusan keamanan: login exporter bisa membaca
   tabel sensitif); tabel bebas khusus Operator/Admin. Jangan dilonggarkan tanpa persetujuan pemilik.
 - Saat menguji worker/jadwal, opsi run WAJIB `skip_s3: true` — default opsi run = upload ke S3 produksi.
+- **Data quality** (README §6): pemeriksaan berat yang gagal (`dq.DQBlocked`) MENAHAN upload. String query
+  template tidak diubah demi parity — `count_query` diturunkan otomatis (`count_query_for()`). Skema acuan di
+  `jobs.schema_json`, diperbarui hanya setelah upload S3 sukses; lepas dengan `manage.py accept-schema <job>`.
+  Pesan log/DQ ASCII saja (konsol cp1252).
 - **Deploy Docker = Windows container** (`Dockerfile.windows`, README §11): base `servercore:ltsc2016`
   WAJIB cocok dengan host server Docker (Windows Server 2016, process isolation) — jangan ganti ke image Linux. Di dalam `RUN`
   jangan pakai kutip ganda (dibuang parsing argumen Windows sebelum PowerShell membacanya). IP untuk

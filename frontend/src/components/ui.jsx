@@ -152,6 +152,23 @@ const BADGE_TONE = {
   amber: 'bg-amber-50 text-amber-700',
 }
 
+// Hasil data quality per item run (pipeline/dq.py): ok | warning | blocked | unchecked.
+const DQ_STATUS = {
+  ok: ['Lolos', 'bg-brand-50 text-brand-700'],
+  warning: ['Peringatan', 'bg-amber-50 text-amber-700'],
+  blocked: ['Ditahan', 'bg-red-50 text-red-700'],
+  unchecked: ['Tidak dicek', 'bg-gray-100 text-gray-500'],
+}
+
+export function DqBadge({ status }) {
+  const [label, classes] = DQ_STATUS[status] || [status, DQ_STATUS.unchecked[1]]
+  return (
+    <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>
+      {label}
+    </span>
+  )
+}
+
 export function Badge({ children, tone = 'gray', className }) {
   return (
     <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', BADGE_TONE[tone], className)}>

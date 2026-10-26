@@ -139,6 +139,18 @@ def parse_overrides(overrides: dict[str, str] | None) -> dict[str, pa.DataType]:
 # TEMPLATE BRONZE -- raw copy tabel sumber, TANPA lewat dispatcher SP
 # ---------------------------------------------------------------------------
 
+def count_query_for(query: str) -> str:
+    """
+    Query hitung baris untuk pemeriksaan DQ (pipeline/dq.py): SELECT template dibungkus subquery,
+    jadi filternya IDENTIK dengan query ekspor dan parameternya sama persis. Hanya untuk SELECT
+    tanpa ORDER BY / CTE (semua template bronze kecuali ArcSDE yang memakai EXEC ... AT).
+    """
+    body = query.strip()
+    if body.upper().startswith("SET NOCOUNT ON;"):
+        body = body[len("SET NOCOUNT ON;"):].strip()
+    return f"SET NOCOUNT ON; SELECT COUNT_BIG(*) FROM ({body}) AS dq_src"
+
+
 # Semua template bronze menerima `overrides` (paksa tipe Arrow per kolom, teks -- lihat
 # parse_arrow_type) & `labels` (kolom target ML) OPSIONAL. Default kosong = sama persis dengan
 # helper lama di jobs.py (parity tetap identik).
@@ -156,10 +168,12 @@ def bronze_daily(name: str, target_date: str, *, table: str, date_col: str, data
             SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)
             WHERE {date_col} >= CAST(? AS DATE) AND {date_col} < DATEADD(DAY, 1, CAST(? AS DATE))
         """
+    dt = _datetime.strptime(target_date, "%Y-%m-%d")
     return Job(name=name, query=query, params=[target_date, target_date], output=output,
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_daily(target_date, dataset, layer="bronze", module=module, file_name=output),
-               needs_date=True)
+               needs_date=True, count_query=count_query_for(query),
+               date_check={"column": date_col, "min": dt, "max_excl": dt + _timedelta(days=1)})
 
 
 def bronze_daily_strdate(name: str, target_date: str, *, table: str, date_col: str, dataset: str, db: str,
@@ -182,7 +196,8 @@ def bronze_daily_strdate(name: str, target_date: str, *, table: str, date_col: s
     return Job(name=name, query=query, params=[target_date, next_day], output=output,
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_daily(target_date, dataset, layer="bronze", module=module, file_name=output),
-               needs_date=True)
+               needs_date=True, count_query=count_query_for(query),
+               date_check={"column": date_col, "min": target_date, "max_excl": next_day})
 
 
 # Format tanggal string yang didukung bronze_daily_strdate_eq (strftime). Whitelist -- nilainya
@@ -222,7 +237,8 @@ def bronze_daily_strdate_eq(name: str, target_date: str, *, table: str, date_col
     return Job(name=name, query=query, params=[dt.strftime(date_format)], output=output,
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_daily(target_date, dataset, layer="bronze", module=module, file_name=output),
-               needs_date=True)
+               needs_date=True, count_query=count_query_for(query),
+               date_check={"column": date_col, "equals": dt.strftime(date_format)})
 
 
 def bronze_daily_epoch_ms(name: str, target_date: str, *, table: str, date_col: str, dataset: str, db: str,
@@ -247,7 +263,8 @@ def bronze_daily_epoch_ms(name: str, target_date: str, *, table: str, date_col: 
     return Job(name=name, query=query, params=[start_ms, end_ms], output=output,
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_daily(target_date, dataset, layer="bronze", module=module, file_name=output),
-               needs_date=True)
+               needs_date=True, count_query=count_query_for(query),
+               date_check={"column": date_col, "min": start_ms, "max_excl": end_ms})
 
 
 def bronze_daily_join(name: str, target_date: str, *, table: str, alias: str, join_table: str,
@@ -271,7 +288,7 @@ def bronze_daily_join(name: str, target_date: str, *, table: str, alias: str, jo
     return Job(name=name, query=query, params=[target_date, target_date], output=output,
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_daily(target_date, dataset, layer="bronze", module=module, file_name=output),
-               needs_date=True)
+               needs_date=True, count_query=count_query_for(query))
 
 
 def bronze_master(name: str, target_date: str, *, table: str, dataset: str, db: str,
@@ -289,7 +306,7 @@ def bronze_master(name: str, target_date: str, *, table: str, dataset: str, db: 
                overrides=parse_overrides(overrides), labels=list(labels or []),
                s3_key=s3_master(target_date, dataset, layer="bronze", module=module,
                                 file_name=s3_file_name or output),
-               needs_date=False)
+               needs_date=False, count_query=count_query_for(query))
 
 
 def bronze_arcsde_view(name: str, target_date: str, *, linked_server: str, sde_db: str, sde_version: str,

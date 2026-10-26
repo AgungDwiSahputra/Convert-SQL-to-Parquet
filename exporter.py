@@ -35,10 +35,12 @@ from datetime import datetime, timedelta
 
 import pyodbc
 
+from pipeline import dq
 from pipeline.config import BATCH_SIZE, COMPRESSION, CONN_STR
 from pipeline.export import log, make_s3_client, run_job, setup_logging
 from pipeline.job_store import (
-    JobStoreError, build_jobs, connect, default_target_date, init_db, load_job_rows, mark_s3_uploaded,
+    JobStoreError, build_jobs, connect, default_target_date, get_schema_baseline, init_db, load_job_rows,
+    mark_s3_uploaded, save_schema_baseline,
 )
 
 
@@ -161,9 +163,13 @@ def main() -> int:
                         continue
                     date_suffix = d.strftime("%Y%m%d") if (is_range and job.needs_date) else None
                     try:
-                        result = run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local)
+                        audit = dq.AuditContext(date_str, get_schema_baseline(job.name))
+                        result = run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local,
+                                         audit)
                         if result.s3_key:
                             mark_s3_uploaded(job.name)  # path S3 sudah dipakai -> dikunci di Web UI
+                        if dq.should_save_baseline(job, result, audit):
+                            save_schema_baseline(job.name, result.dq.schema)
                         ok += 1
                         if not job.needs_date:
                             date_independent_done.add(job.name)
