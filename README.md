@@ -49,6 +49,7 @@ LoadParquetProcess/
 | `pipeline/job.py` | `@dataclass Job` | Field baru |
 | `pipeline/config.py` | Koneksi, batch, kompresi, path, setelan — semua dari `.env` | Setelan global |
 | `pipeline/run_store.py`, `scheduler.py`, `notify.py`, `maintenance.py`, `app_settings.py` | Antrian & riwayat run, jadwal, email, backup & bersih log, setelan non-rahasia | Fitur operasional |
+| `pipeline/freshness.py` | Kesegaran data per job + penjaga harian (§10) | Aturan kesegaran berubah |
 | `webapp/` | `main.py` (app, SPA, kunci MIME), `routes_*.py` per kelompok API, `catalog.py` (metadata SQL Server, uji coba, ekspor cepat) | Fitur Web UI |
 | `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite) | Tampilan |
 
@@ -326,12 +327,41 @@ Karena itu `bronze_daily_strdate_eq` memakai `CAST(? AS VARCHAR(n))`. Template l
 
 ## 10. Operasional
 
-**Jadwal** (`pipeline/scheduler.py`, halaman Jadwal): jam WIB harian/mingguan + cakupan job (pola
-nama, modul, atau daftar job) + opsi run. Thread di worker (tiap 20 detik) mengubah jadwal yang jatuh
-tempo menjadi run biasa atas nama `jadwal:<nama>`. Tanggal data = tanggal jadwal − `date_offset`, jadi
-run yang terlambat tetap memproses tanggal yang benar; kejadian yang terlewat berhari-hari hanya
-ditembak sekali. Cakupan dievaluasi saat ditembak, jadi job baru yang cocok pola otomatis ikut.
-Jadwal baru **nonaktif**.
+**Jadwal** (`pipeline/scheduler.py`, halaman Jadwal): jam WIB harian / mingguan / bulanan (tanggal 1–28)
++ **rentang tanggal data** + cakupan job (pola nama, modul, **irama**, atau daftar job) + opsi run. Thread
+di worker (tiap 20 detik) mengubah jadwal yang jatuh tempo menjadi run biasa atas nama `jadwal:<nama>`.
+Rentang dihitung dari tanggal jadwal (bukan jam tembak), jadi run yang terlambat tetap memproses tanggal
+yang benar; kejadian yang terlewat berhari-hari hanya ditembak sekali. Cakupan dievaluasi saat ditembak,
+jadi job baru yang cocok otomatis ikut. Jadwal baru **nonaktif**.
+
+| Rentang | Tanggal data |
+|---|---|
+| Satu tanggal | H-`offset` (mis. H-1 = kemarin) |
+| Beberapa hari terakhir | N hari s/d H-`offset`, mis. H-2..H-1 |
+| Minggu lalu | Senin–Minggu sebelum tanggal jadwal |
+| Bulan lalu | Tanggal 1 s/d akhir bulan sebelum tanggal jadwal |
+
+Rentang lebih dari satu hari: job **snapshot (master) tetap diambil sekali dengan label tanggal awal**
+rentang — form jadwal memperingatkan; buat jadwal master terpisah dengan satu tanggal.
+
+Susunan yang disarankan (proses sumber WM untuk H-1 berjalan mulai 00:01, selesai sekitar 01:00–02:00):
+
+| Jadwal | Waktu | Cakupan | Rentang |
+|---|---|---|---|
+| Harian | 03:00 | Irama harian | H-2..H-1 — H-1 baru + H-2 diambil ulang (pemeriksaan & penyembuhan kalau load kemarin belum lengkap) |
+| Master | 03:00 | Irama snapshot | Satu tanggal H-1 |
+| Mingguan | Senin 03:30 | Irama mingguan | Minggu lalu |
+| Bulanan | Tanggal 3, 04:00 | Irama bulanan | Bulan lalu |
+
+**Kesegaran data** (`pipeline/freshness.py`): per job, tanggal terbaru yang **sudah diproses** — ada
+hasil di `dq_results` yang tidak ditahan DQ dan sudah dipublikasikan atau memang 0 baris (run uji
+`--skip-s3` berisi data tidak dihitung). Dibandingkan dengan tanggal yang diharapkan: harian/snapshot
+H-1, mingguan Minggu lalu, bulanan akhir bulan lalu (mulai tanggal 3). Tampil sebagai badge
+**Segar / Terlambat / Belum ada data** di Daftar Job (ada filter "Aktif · terlambat"), detail job, dan
+Beranda. **Penjaga harian** (halaman Pengaturan → Data quality, default **nonaktif**): sekali sehari
+setelah jam cek (default 06:00) mengirim email daftar job yang belum segar ke penerima tetap. Aktifkan
+setelah jadwal pindah dari Task Scheduler ke aplikasi — run di mesin lain dengan `jobs.db` lain tidak
+terlihat di sini.
 
 > **Hindari ekspor dobel.** Selama `run_exporter.bat` masih terjadwal di Task Scheduler, jangan
 > aktifkan jadwal aplikasi untuk job yang sama, dan jangan menjalankannya dari UI pada jam yang sama.
@@ -343,6 +373,7 @@ Jadwal baru **nonaktif**.
 - **Peringatan data quality** — run tidak gagal tapi ada peringatan DQ: satu email ringkasan per run.
 - **Anomali 0 baris** — job berirama **harian** yang biasanya berisi data tapi N tanggal terakhir
   (default 3) kosong; sekali per kejadian. Job mingguan/bulanan tidak ikut (wajar kosong di hari biasa).
+- **Data belum segar** — hasil penjaga kesegaran harian (kalau diaktifkan), ke penerima tetap.
 - Penerima = daftar tetap + pembuat run. Akun SMTP hanya di `.env` (`SMTP_*`); isi `APP_BASE_URL`
   supaya email berisi link.
 - Gagal kirim tidak memengaruhi run. Semua percobaan tercatat di tabel `notifications`; tombol

@@ -29,7 +29,7 @@ import time
 
 import pyodbc
 
-from pipeline import dq, maintenance, notify, run_store, scheduler
+from pipeline import dq, freshness, maintenance, notify, run_store, scheduler
 from pipeline.config import CONN_STR
 from pipeline.export import LOG_DATEFMT, LOG_FORMAT, log, make_s3_client, run_job, setup_logging
 from pipeline.job_store import JobStoreError, init_db, mark_s3_uploaded
@@ -54,6 +54,13 @@ def scheduler_round(db) -> None:
                      result["backup"], result["logs_removed"], result["sessions_removed"])
     except Exception:  # noqa: BLE001
         log.exception("Pemeliharaan harian gagal.")
+    try:
+        result = freshness.run_daily(db)
+        if result:
+            log.log(logging.WARNING if result["late"] else logging.INFO,
+                    "Pemeriksaan kesegaran: %s dari %s job aktif belum segar (terlambat / belum ada data).", len(result["late"]), result["checked"])
+    except Exception:  # noqa: BLE001
+        log.exception("Pemeriksaan kesegaran gagal.")
 
 
 class _Scheduler(threading.Thread):

@@ -5,23 +5,30 @@ import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi, useDebounced } from '../lib/hooks'
 import { fmtDateTime, fmtRelative, fmtUntil } from '../lib/format'
-import { NO_MODULE } from '../lib/jobs'
+import { CADENCE_LABEL, NO_MODULE } from '../lib/jobs'
 import {
   Alert, Badge, Button, Card, EmptyState, Field, IconChip, LoadingBlock, Modal, PageHeader, StatusBadge, Switch, Toggle, cx, inputClass,
 } from '../components/ui'
 
 const WEEKDAYS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min']
 const OFFSETS = [[0, 'Hari ini (H-0)'], [1, 'Kemarin (H-1)'], [2, '2 hari lalu (H-2)'], [3, '3 hari lalu (H-3)'], [7, '7 hari lalu (H-7)']]
+const WINDOWS = [['offset', 'Satu tanggal'], ['last_days', 'Beberapa hari terakhir'], ['prev_week', 'Minggu lalu (Senin–Minggu)'], ['prev_month', 'Bulan lalu']]
 const selectClass = `${inputClass} pr-8`
-
-function offsetLabel(n) {
-  return OFFSETS.find(([v]) => v === n)?.[1] || `H-${n}`
-}
 
 function selectorLabel(sel) {
   if (sel.mode === 'pattern') return `Pola nama: ${sel.patterns.join(', ')}`
   if (sel.mode === 'modules') return `Modul: ${sel.modules.join(', ')}`
+  if (sel.mode === 'cadence') return `Irama: ${sel.cadences.map((c) => CADENCE_LABEL[c] || c).join(', ')}`
   return `${sel.jobs.length} job dipilih`
+}
+
+// Ringkasan rentang di form (versi server: scheduler.describe_window).
+function windowSummary(f) {
+  const end = f.date_offset === 0 ? 'hari ini' : `H-${f.date_offset}`
+  if (f.window_mode === 'prev_week') return 'Senin–Minggu minggu sebelum tanggal jadwal'
+  if (f.window_mode === 'prev_month') return 'tanggal 1 s/d akhir bulan sebelum tanggal jadwal'
+  if (f.window_mode === 'last_days' && f.window_days > 1) return `H-${f.date_offset + f.window_days - 1} s/d ${end} (${f.window_days} hari)`
+  return end
 }
 
 function Segmented({ value, onChange, options, label }) {
@@ -44,15 +51,17 @@ function Segmented({ value, onChange, options, label }) {
 }
 
 const EMPTY = {
-  name: '', enabled: false, frequency: 'daily', time_of_day: '06:00', weekdays: [], date_offset: 1,
-  selector: { mode: 'pattern', patterns: ['bronze_*'], modules: [], jobs: [] },
+  name: '', enabled: false, frequency: 'daily', time_of_day: '06:00', weekdays: [], day_of_month: 1, date_offset: 1,
+  window_mode: 'offset', window_days: 2,
+  selector: { mode: 'pattern', patterns: ['bronze_*'], modules: [], jobs: [], cadences: [] },
   options: { skip_s3: false, skip_local: true, stop_on_error: false },
 }
 
 function ScheduleForm({ initial, onClose, onSaved }) {
   const isEdit = !!initial?.id
   const [form, setForm] = useState(() => (isEdit ? {
-    ...EMPTY, ...initial, selector: { ...EMPTY.selector, ...initial.selector }, options: { ...EMPTY.options, ...initial.options },
+    ...EMPTY, ...initial, day_of_month: initial.day_of_month || 1, window_days: Math.max(initial.window_days || 1, 2),
+    selector: { ...EMPTY.selector, ...initial.selector }, options: { ...EMPTY.options, ...initial.options },
   } : EMPTY))
   const [patternText, setPatternText] = useState(form.selector.patterns.join(', '))
   const [jobSearch, setJobSearch] = useState('')
@@ -85,8 +94,13 @@ function ScheduleForm({ initial, onClose, onSaved }) {
     setSaving(true)
     setError(null)
     try {
-      const body = { ...form, weekdays: form.frequency === 'weekly' ? form.weekdays : [] }
-      for (const k of ['id', 'next_run_at', 'last_run_at', 'last_run_id', 'last_message', 'last_run_status', 'created_by', 'created_at', 'updated_by', 'updated_at', 'description', 'job_count', 'job_names']) delete body[k]
+      const body = {
+        ...form,
+        weekdays: form.frequency === 'weekly' ? form.weekdays : [],
+        day_of_month: form.frequency === 'monthly' ? form.day_of_month : null,
+        window_days: form.window_mode === 'last_days' ? form.window_days : 1,
+      }
+      for (const k of ['id', 'next_run_at', 'last_run_at', 'last_run_id', 'last_message', 'last_run_status', 'created_by', 'created_at', 'updated_by', 'updated_at', 'description', 'window_label', 'job_count', 'job_names', 'snapshot_count']) delete body[k]
       if (isEdit) await api(`/schedules/${initial.id}`, { method: 'PUT', body })
       else await api('/schedules', { method: 'POST', body })
       onSaved()
@@ -118,7 +132,7 @@ function ScheduleForm({ initial, onClose, onSaved }) {
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Frekuensi">
-            <Segmented label="Frekuensi" value={form.frequency} onChange={(v) => set({ frequency: v })} options={[['daily', 'Harian'], ['weekly', 'Mingguan']]} />
+            <Segmented label="Frekuensi" value={form.frequency} onChange={(v) => set({ frequency: v })} options={[['daily', 'Harian'], ['weekly', 'Mingguan'], ['monthly', 'Bulanan']]} />
           </Field>
           <Field label="Jam (WIB)" htmlFor="s-time">
             <input id="s-time" type="time" className={inputClass} value={form.time_of_day} onChange={(e) => set({ time_of_day: e.target.value })} />
@@ -142,15 +156,54 @@ function ScheduleForm({ initial, onClose, onSaved }) {
             </div>
           </Field>
         )}
-        <Field label="Tanggal data yang diproses" htmlFor="s-offset" hint="Dihitung dari tanggal jadwal, bukan jam run berjalan — run yang terlambat tetap memproses tanggal yang benar.">
-          <select id="s-offset" className={selectClass} value={form.date_offset} onChange={(e) => set({ date_offset: Number(e.target.value) })}>
-            {OFFSETS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
-          </select>
+        {form.frequency === 'monthly' && (
+          <Field label="Tanggal" htmlFor="s-dom" hint="1–28 (tanggal 29–31 tidak ada di semua bulan).">
+            <select id="s-dom" className={`${selectClass} sm:w-40`} value={form.day_of_month} onChange={(e) => set({ day_of_month: Number(e.target.value) })}>
+              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>Tanggal {d}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Rentang tanggal data" hint={`Dihitung dari tanggal jadwal, bukan jam run berjalan — run yang terlambat tetap memproses tanggal yang benar. Saat ini: ${windowSummary(form)}.`}>
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto]">
+            <select aria-label="Jenis rentang" className={selectClass} value={form.window_mode} onChange={(e) => set({ window_mode: e.target.value })}>
+              {WINDOWS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+            {form.window_mode === 'last_days' && (
+              <div className="flex items-center gap-2">
+                <input aria-label="Jumlah hari" type="number" min={2} max={31} className={`${inputClass} w-20`} value={form.window_days} onChange={(e) => set({ window_days: Math.min(31, Math.max(2, Number(e.target.value) || 2)) })} />
+                <span className="text-sm text-gray-500">hari s/d</span>
+              </div>
+            )}
+            {['offset', 'last_days'].includes(form.window_mode) && (
+              <select aria-label="Tanggal (akhir)" className={selectClass} value={form.date_offset} onChange={(e) => set({ date_offset: Number(e.target.value) })}>
+                {OFFSETS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+              </select>
+            )}
+          </div>
         </Field>
 
         <Field label="Cakupan job">
           <div className="space-y-3">
-            <Segmented label="Cakupan" value={form.selector.mode} onChange={(v) => setSel({ mode: v })} options={[['pattern', 'Pola nama'], ['modules', 'Modul'], ['jobs', 'Pilih job']]} />
+            <Segmented label="Cakupan" value={form.selector.mode} onChange={(v) => setSel({ mode: v })} options={[['pattern', 'Pola nama'], ['modules', 'Modul'], ['cadence', 'Irama'], ['jobs', 'Pilih job']]} />
+            {form.selector.mode === 'cadence' && (
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(CADENCE_LABEL).map(([c, label]) => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-pressed={form.selector.cadences.includes(c)}
+                      onClick={() => setSel({ cadences: toggleIn(form.selector.cadences, c) })}
+                      className={cx('rounded-lg border px-3 py-1.5 text-sm transition-colors',
+                        form.selector.cadences.includes(c) ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-gray-300 text-gray-600 hover:bg-gray-50')}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500">Semua job aktif dengan irama terpilih (atur di form job). Job baru ikut otomatis.</p>
+              </div>
+            )}
             {form.selector.mode === 'pattern' && (
               <div className="space-y-1.5">
                 <input aria-label="Pola nama job" className={`${inputClass} font-mono`} value={patternText} onChange={(e) => setPatternText(e.target.value)} placeholder="bronze_*, bronze_iot_*" />
@@ -190,6 +243,12 @@ function ScheduleForm({ initial, onClose, onSaved }) {
                   ))}
                 </ul>
               </div>
+            )}
+            {preview?.snapshot_count > 0 && form.window_mode !== 'offset' && !(form.window_mode === 'last_days' && form.window_days < 2) && (
+              <Alert tone="warning">
+                {preview.snapshot_count} job snapshot (master) ikut cakupan. Dalam rentang lebih dari satu hari, master hanya diambil
+                sekali dengan label tanggal <strong>awal</strong> rentang — buat jadwal master terpisah dengan satu tanggal.
+              </Alert>
             )}
             {preview && (
               <div className="rounded-lg bg-brand-50 px-3 py-2.5 text-sm text-brand-900">
@@ -305,7 +364,7 @@ export default function SchedulesPage() {
                 </div>
                 <div>
                   <dt className="text-xs text-gray-500">Tanggal data</dt>
-                  <dd className="mt-0.5 text-gray-800">{offsetLabel(s.date_offset)}</dd>
+                  <dd className="mt-0.5 text-gray-800">{s.window_label}</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-gray-500">Berikutnya</dt>

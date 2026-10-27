@@ -169,6 +169,26 @@ export function DqBadge({ status }) {
   )
 }
 
+// Kesegaran data job (pipeline/freshness.py): fresh | late | unknown.
+const FRESHNESS = {
+  fresh: ['Segar', 'bg-brand-50 text-brand-700'],
+  late: ['Terlambat', 'bg-red-50 text-red-700'],
+  unknown: ['Belum ada data', 'bg-gray-100 text-gray-500'],
+}
+
+export function FreshnessBadge({ freshness }) {
+  if (!freshness) return null
+  const [label, classes] = FRESHNESS[freshness.status] || FRESHNESS.unknown
+  const title = freshness.latest
+    ? `Data terbaru ${freshness.latest} · seharusnya ≥ ${freshness.expected}`
+    : `Belum ada tanggal yang diproses · seharusnya ${freshness.expected}`
+  return (
+    <span title={title} className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>
+      {label}{freshness.status === 'late' && freshness.lag_days ? ` · ${freshness.lag_days} hari` : ''}
+    </span>
+  )
+}
+
 export function Badge({ children, tone = 'gray', className }) {
   return (
     <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', BADGE_TONE[tone], className)}>

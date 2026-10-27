@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDate, fmtDateTime, fmtNumber, fmtRelative, reflow } from '../lib/format'
 import { CADENCE_LABEL, HISTORY_LABEL, STRDATE_LABEL, TYPE_LABEL, diffSnapshots, jobType } from '../lib/jobs'
-import { Alert, Badge, Button, Card, DqBadge, LoadingBlock, Modal, StatusBadge } from '../components/ui'
+import { Alert, Badge, Button, Card, DqBadge, FreshnessBadge, LoadingBlock, Modal, StatusBadge } from '../components/ui'
 import { EnabledBadge } from './JobsPage'
 
 function Section({ title, icon: Icon, children, action }) {
@@ -156,6 +156,16 @@ export default function JobDetailPage() {
                 {CADENCE_LABEL[job.cadence_effective] || job.cadence_effective}
                 {!job.cadence && <span className="text-gray-500"> (otomatis dari template)</span>}
               </Row>
+              {job.enabled && job.freshness && (
+                <Row label="Kesegaran">
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <FreshnessBadge freshness={job.freshness} />
+                    <span className="text-gray-600">
+                      data terbaru {job.freshness.latest ? fmtDate(job.freshness.latest) : 'belum ada'} · seharusnya {fmtDate(job.freshness.expected)}
+                    </span>
+                  </span>
+                </Row>
+              )}
               <Row label="Skema acuan DQ">
                 {job.schema_baseline
                   ? `${job.schema_baseline.columns} kolom · sejak ${fmtDateTime(job.schema_baseline.updated_at)}`

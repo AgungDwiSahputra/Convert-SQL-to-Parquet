@@ -1,9 +1,11 @@
 import { Link, useNavigate } from 'react-router'
-import { ArrowRight, CalendarClock, CircleAlert, Database, History, Lightbulb, Play, Plus, Server, Zap } from 'lucide-react'
+import { ArrowRight, CalendarClock, CircleAlert, Clock, Database, History, Lightbulb, Play, Plus, Server, Zap } from 'lucide-react'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateRange, fmtDateTime, fmtNumber, fmtRelative, fmtCreator, fmtUntil } from '../lib/format'
-import { ACTIVE_STATUSES, Alert, Button, Card, CardHeader, EmptyState, LoadingBlock, ProgressBar, StatCard, StatusBadge } from '../components/ui'
+import {
+  ACTIVE_STATUSES, Alert, Button, Card, CardHeader, EmptyState, FreshnessBadge, LoadingBlock, ProgressBar, StatCard, StatusBadge,
+} from '../components/ui'
 
 const TZ = 'Asia/Jakarta'
 const wibDay = (d) => d.toLocaleDateString('en-CA', { timeZone: TZ })
@@ -54,6 +56,8 @@ export default function DashboardPage() {
   const failed7 = runs.filter((r) => new Date(r.created_at).getTime() >= weekAgo && ['failed', 'interrupted'].includes(r.status))
   const active = runs.filter((r) => ACTIVE_STATUSES.includes(r.status))
   const enabledJobs = jobs.filter((j) => j.enabled).length
+  const lateJobs = jobs.filter((j) => j.enabled && j.freshness?.status === 'late')
+  const unknownJobs = jobs.filter((j) => j.enabled && j.freshness?.status === 'unknown')
   const isOperator = hasRole(user, 'operator')
   const upcoming = (schedData?.schedules || []).filter((s) => s.enabled && s.next_run_at)
     .sort((a, b) => a.next_run_at.localeCompare(b.next_run_at)).slice(0, 3)
@@ -133,6 +137,44 @@ export default function DashboardPage() {
               <QuickAction icon={Database} title="Daftar job" desc={`${fmtNumber(jobs.length)} job · cari & lihat detail`} onClick={() => navigate('/jobs')} />
               <QuickAction icon={History} title="Riwayat run" desc="Status, log, dan hasil ekspor" onClick={() => navigate('/runs')} />
             </div>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <CardHeader
+              icon={Clock}
+              title="Kesegaran data"
+              description="Tanggal terbaru yang sudah diproses per job aktif"
+              action={<Link to="/jobs" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Lihat</Link>}
+            />
+            <div className="grid grid-cols-3 divide-x divide-gray-100 border-b border-gray-100 text-center">
+              {[
+                ['Segar', enabledJobs - lateJobs.length - unknownJobs.length, 'text-brand-700'],
+                ['Terlambat', lateJobs.length, lateJobs.length ? 'text-red-600' : 'text-gray-800'],
+                ['Belum ada', unknownJobs.length, 'text-gray-500'],
+              ].map(([label, n, color]) => (
+                <div key={label} className="px-2 py-3">
+                  <p className={`text-xl font-semibold tabular-nums ${color}`}>{fmtNumber(n)}</p>
+                  <p className="text-xs text-gray-500">{label}</p>
+                </div>
+              ))}
+            </div>
+            {lateJobs.length === 0 ? (
+              <p className="px-5 py-4 text-sm text-gray-500">{unknownJobs.length ? 'Tidak ada yang terlambat. Job "belum ada" baru tercatat setelah run pertama dengan versi ini.' : 'Semua job aktif sudah memproses data terbaru.'}</p>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {lateJobs.slice(0, 5).map((j) => (
+                  <li key={j.name}>
+                    <Link to={`/jobs/${encodeURIComponent(j.name)}`} className="flex items-center justify-between gap-3 px-5 py-2.5 hover:bg-gray-50">
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-gray-800">{j.name}</span>
+                        <span className="block text-xs text-gray-500">terbaru {j.freshness.latest} · seharusnya {j.freshness.expected}</span>
+                      </span>
+                      <FreshnessBadge freshness={j.freshness} />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
 
           <Card className="overflow-hidden">

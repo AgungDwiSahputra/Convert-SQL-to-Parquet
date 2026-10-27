@@ -234,6 +234,46 @@ SELECT job_name, target_date, rows, source_rows, COALESCE(dq_status, 'unchecked'
        CASE WHEN s3_key IS NOT NULL THEN 1 ELSE 0 END, run_id, dq_detail, COALESCE(finished_at, started_at, '')
 FROM run_items WHERE status = 'success' AND rows IS NOT NULL ORDER BY id;
 """,
+    # v8 -- data quality tahap C: jadwal bulanan + rentang tanggal. CHECK frequency harus diperluas, jadi
+    # tabel schedules DIBANGUN ULANG (prosedur ALTER TABLE umum SQLite). foreign_keys dimatikan sementara
+    # karena runs.schedule_id menunjuk tabel yang di-drop lalu diganti namanya.
+    """
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE schedules_v8 (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT    NOT NULL UNIQUE,
+    enabled       INTEGER NOT NULL DEFAULT 0,      -- default nonaktif (hindari dobel dgn Task Scheduler)
+    frequency     TEXT    NOT NULL CHECK (frequency IN ('daily', 'weekly', 'monthly')),
+    time_of_day   TEXT    NOT NULL,                -- 'HH:MM' jam dinding WIB
+    weekdays      TEXT,                            -- JSON [0..6], Senin = 0 (khusus weekly)
+    day_of_month  INTEGER,                         -- 1..28 (khusus monthly)
+    date_offset   INTEGER NOT NULL DEFAULT 1,      -- tanggal data = tanggal jadwal (WIB) - offset hari
+    window_mode   TEXT    NOT NULL DEFAULT 'offset'
+                  CHECK (window_mode IN ('offset', 'last_days', 'prev_week', 'prev_month')),
+    window_days   INTEGER NOT NULL DEFAULT 1,      -- khusus last_days: N hari s/d H-offset
+    selector      TEXT    NOT NULL,                -- JSON {"mode": "pattern"|"modules"|"jobs"|"cadence", ...}
+    options       TEXT    NOT NULL,                -- JSON opsi run (sama dengan run manual)
+    next_run_at   TEXT,                            -- ISO UTC; NULL kalau nonaktif
+    last_run_at   TEXT,
+    last_run_id   INTEGER,
+    last_message  TEXT,
+    created_by    TEXT    NOT NULL,
+    created_at    TEXT    NOT NULL,
+    updated_by    TEXT,
+    updated_at    TEXT
+);
+INSERT INTO schedules_v8 (id, name, enabled, frequency, time_of_day, weekdays, date_offset, selector, options,
+                          next_run_at, last_run_at, last_run_id, last_message, created_by, created_at,
+                          updated_by, updated_at)
+SELECT id, name, enabled, frequency, time_of_day, weekdays, date_offset, selector, options, next_run_at,
+       last_run_at, last_run_id, last_message, created_by, created_at, updated_by, updated_at FROM schedules;
+DROP TABLE schedules;
+ALTER TABLE schedules_v8 RENAME TO schedules;
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+COMMIT;
+PRAGMA foreign_keys = ON;
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

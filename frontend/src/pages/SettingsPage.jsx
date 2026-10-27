@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bell, HardDrive, Mail, Send } from 'lucide-react'
+import { Bell, HardDrive, Mail, Send, ShieldCheck } from 'lucide-react'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
@@ -7,7 +7,7 @@ import { fmtDateTime, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, PageHeader, Toggle, inputClass } from '../components/ui'
 
 const SECURITY_LABEL = { none: 'tanpa enkripsi', starttls: 'STARTTLS', ssl: 'SSL/TLS' }
-const KIND_LABEL = { run_failed: 'Run gagal', anomaly: 'Anomali', test: 'Uji' }
+const KIND_LABEL = { run_failed: 'Run gagal', dq_warning: 'Peringatan DQ', anomaly: 'Anomali', stale: 'Data terlambat', test: 'Uji' }
 const STATUS_TONE = { sent: 'mint', failed: 'amber', skipped: 'gray' }
 const STATUS_LABEL = { sent: 'Terkirim', failed: 'Gagal', skipped: 'Dilewati' }
 
@@ -21,16 +21,35 @@ export default function SettingsPage() {
   const [testTo, setTestTo] = useState(user.email || '')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
+  const [dqForm, setDqForm] = useState(null)
+  const [dqSaving, setDqSaving] = useState(false)
+  const [dqMessage, setDqMessage] = useState(null)
 
   useEffect(() => {
     if (data && !form) {
       setForm(data.notify)
       setRecipientsText(data.notify.recipients.join('\n'))
     }
-  }, [data, form])
+    if (data && !dqForm) setDqForm(data.dq)
+  }, [data, form, dqForm])
 
-  if ((loading && !data) || !form) return error ? <Alert tone="error">{error.message}</Alert> : <LoadingBlock />
+  if ((loading && !data) || !form || !dqForm) return error ? <Alert tone="error">{error.message}</Alert> : <LoadingBlock />
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+  const setDq = (k, v) => setDqForm((f) => ({ ...f, [k]: v }))
+
+  const saveDq = async () => {
+    setDqSaving(true)
+    setDqMessage(null)
+    try {
+      const { freshness_last: _last, ...body } = dqForm
+      await api('/settings/dq', { method: 'PUT', body })
+      setDqMessage({ tone: 'info', text: 'Pengaturan data quality tersimpan.' })
+    } catch (e) {
+      setDqMessage({ tone: 'error', text: e.message })
+    } finally {
+      setDqSaving(false)
+    }
+  }
 
   const save = async () => {
     setSaving(true)
@@ -108,6 +127,48 @@ export default function SettingsPage() {
               <Toggle id="n-dq" label="Email peringatan data quality" description="Satu email ringkasan per run kalau ada peringatan DQ (kolom baru, volume menyimpang, selisih hitungan master). Run gagal: peringatan ikut di email run gagal." checked={form.on_dq_warning} onChange={(v) => set('on_dq_warning', v)} />
               <div className="flex justify-end">
                 <Button loading={saving} onClick={save}>Simpan pengaturan</Button>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <CardHeader icon={ShieldCheck} title="Data quality" description="Ambang anomali volume & penjaga kesegaran data" />
+            <div className="space-y-5 p-5">
+              <Field label="Peringatan volume" hint="Jumlah baris dibanding median riwayat sesuai irama job. Hanya peringatan — tidak menahan upload.">
+                <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                  <span>di bawah</span>
+                  <input aria-label="Batas bawah persen" type="number" min={1} max={99} className={`${inputClass} w-20`} value={dqForm.volume_low_pct} onChange={(e) => setDq('volume_low_pct', Number(e.target.value))} />
+                  <span>% atau di atas</span>
+                  <input aria-label="Batas atas persen" type="number" min={101} max={1000} className={`${inputClass} w-24`} value={dqForm.volume_high_pct} onChange={(e) => setDq('volume_high_pct', Number(e.target.value))} />
+                  <span>% median</span>
+                </div>
+              </Field>
+              <Field label="Riwayat minimal" htmlFor="dq-min" hint="Jumlah tanggal riwayat sebelum volume job harian/snapshot mulai dinilai.">
+                <div className="flex items-center gap-3">
+                  <div className="w-24 shrink-0"><input id="dq-min" type="number" min={3} max={60} className={inputClass} value={dqForm.volume_min_history} onChange={(e) => setDq('volume_min_history', Number(e.target.value))} /></div>
+                  <span className="text-sm text-gray-500">tanggal</span>
+                </div>
+              </Field>
+              <Toggle
+                id="fr-enabled"
+                label="Penjaga kesegaran harian"
+                description="Sekali sehari memeriksa apakah tiap job aktif sudah memproses tanggal terbaru (harian/snapshot: H-1, mingguan: minggu lalu, bulanan: bulan lalu) dan mengirim email ke penerima tetap kalau ada yang terlambat. Aktifkan setelah jadwal pindah dari Task Scheduler ke aplikasi."
+                checked={dqForm.freshness_enabled}
+                onChange={(v) => setDq('freshness_enabled', v)}
+              />
+              {dqForm.freshness_enabled && (
+                <Field label="Jam pemeriksaan (WIB)" htmlFor="fr-time" hint="Beri jeda setelah jadwal ekspor harian selesai.">
+                  <input id="fr-time" type="time" className={`${inputClass} w-32`} value={dqForm.freshness_check_time} onChange={(e) => setDq('freshness_check_time', e.target.value)} />
+                </Field>
+              )}
+              {data.dq.freshness_last && (
+                <p className="text-xs text-gray-500">
+                  Pemeriksaan terakhir {data.dq.freshness_last.date}: {data.dq.freshness_last.late.length} dari {data.dq.freshness_last.checked} job aktif belum segar.
+                </p>
+              )}
+              {dqMessage && <Alert tone={dqMessage.tone}>{dqMessage.text}</Alert>}
+              <div className="flex justify-end">
+                <Button loading={dqSaving} onClick={saveDq}>Simpan pengaturan DQ</Button>
               </div>
             </div>
           </Card>

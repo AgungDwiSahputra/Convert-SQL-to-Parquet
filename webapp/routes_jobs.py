@@ -15,6 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from pipeline import freshness
 from pipeline.job_store import (
     JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, load_job_rows,
     set_job_enabled, update_job,
@@ -56,7 +57,7 @@ class TestRunIn(BaseModel):
     limit: int = Field(100, ge=1, le=500)
 
 
-def _job_dict(row: JobRow, job, role: str) -> dict:
+def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
     try:
         s3_key = job.s3_key({}) if job.s3_key else None
     except KeyError:  # layout mingguan: path baru diketahui dari data
@@ -77,6 +78,7 @@ def _job_dict(row: JobRow, job, role: str) -> dict:
         "s3_locked_at": row.s3_locked_at,
         "cadence": row.cadence,
         "cadence_effective": row.effective_cadence,
+        "freshness": fresh,
         "updated_by": row.updated_by,
         "updated_at": row.updated_at,
         "can_edit": can_edit(role, row.template),
@@ -101,11 +103,12 @@ def _get_or_404(db: sqlite3.Connection, name: str) -> JobRow:
 
 
 @router.get("")
-def list_jobs(user: dict = Depends(current_user)):
+def list_jobs(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
     rows = load_job_rows(enabled_only=False)
     example_date = default_target_date()
+    fresh = freshness.job_freshness(db, rows)
     return {"example_date": example_date,
-            "jobs": [_job_dict(r, j, user["role"]) for r, j in zip(rows, build_jobs(example_date, rows))]}
+            "jobs": [_job_dict(r, j, user["role"], fresh[r.name]) for r, j in zip(rows, build_jobs(example_date, rows))]}
 
 
 @router.get("/templates")
@@ -166,7 +169,7 @@ def get_job(name: str, user: dict = Depends(current_user), db: sqlite3.Connectio
                         "ORDER BY i.id DESC LIMIT 10", (name,)).fetchall()
     base = db.execute("SELECT schema_json, schema_updated_at FROM jobs WHERE name = ?", (name,)).fetchone()
     schema = json.loads(base["schema_json"]) if base["schema_json"] else None
-    return {**_job_dict(row, job, user["role"]), "query": job.query,
+    return {**_job_dict(row, job, user["role"], freshness.job_freshness(db, [row])[name]), "query": job.query,
             "history": job_history(db, name), "recent_runs": [dict(r) for r in recent],
             "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None}
 

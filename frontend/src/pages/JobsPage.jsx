@@ -4,7 +4,7 @@ import { ChevronRight, Database, Lock, Plus, Search } from 'lucide-react'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { NO_MODULE, TYPE_LABEL, jobType } from '../lib/jobs'
-import { Alert, Badge, Button, Card, EmptyState, LoadingBlock, PageHeader, inputClass } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState, FreshnessBadge, LoadingBlock, PageHeader, inputClass } from '../components/ui'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -40,7 +40,9 @@ export default function JobsPage() {
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
     return jobs.filter((j) => {
-      if (status !== 'all' && j.enabled !== (status === 'enabled')) return false
+      if (status === 'late') {
+        if (!j.enabled || j.freshness?.status !== 'late') return false
+      } else if (status !== 'all' && j.enabled !== (status === 'enabled')) return false
       if (moduleFilter !== 'all' && (j.s3?.module || NO_MODULE) !== moduleFilter) return false
       if (typeFilter !== 'all' && jobType(j) !== typeFilter) return false
       if (!q) return true
@@ -74,6 +76,7 @@ export default function JobsPage() {
           </div>
           <select aria-label="Filter status" className={selectClass} value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="enabled">Aktif</option>
+            <option value="late">Aktif · terlambat</option>
             <option value="disabled">Nonaktif</option>
             <option value="all">Semua status</option>
           </select>
@@ -99,6 +102,7 @@ export default function JobsPage() {
                   <tr className="border-b border-gray-200 bg-gray-50/80 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
                     <th className="px-4 py-3">Job</th>
                     <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Kesegaran</th>
                     <th className="px-4 py-3">Tipe</th>
                     <th className="px-4 py-3">Folder S3</th>
                     <th className="px-4 py-3">Diubah</th>
@@ -113,6 +117,7 @@ export default function JobsPage() {
                         <p className="mt-0.5 max-w-md truncate text-xs text-gray-500">{j.template_label}</p>
                       </td>
                       <td className="px-4 py-3"><EnabledBadge enabled={j.enabled} /></td>
+                      <td className="px-4 py-3">{j.enabled ? <FreshnessBadge freshness={j.freshness} /> : <span className="text-gray-400">–</span>}</td>
                       <td className="px-4 py-3 text-gray-600">{TYPE_LABEL[jobType(j)]}</td>
                       <td className="px-4 py-3"><Target job={j} /></td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{j.updated_by || '–'}</td>
@@ -128,7 +133,10 @@ export default function JobsPage() {
                   <button type="button" onClick={() => open(j.name)} className="block w-full space-y-1.5 px-4 py-3.5 text-left active:bg-gray-50">
                     <div className="flex items-center justify-between gap-3">
                       <span className="truncate font-medium text-gray-800">{j.name}</span>
-                      <EnabledBadge enabled={j.enabled} />
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        {j.enabled && <FreshnessBadge freshness={j.freshness} />}
+                        <EnabledBadge enabled={j.enabled} />
+                      </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                       <span>{TYPE_LABEL[jobType(j)]}</span>·<Target job={j} />

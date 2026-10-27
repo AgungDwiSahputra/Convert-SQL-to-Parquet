@@ -9,6 +9,7 @@ NOTIFIKASI EMAIL -- dikirim worker.py setelah run selesai.
                berturut-turut (kasus kegagalan senyap, mis. filter tanggal salah format). Dikirim SEKALI
                per kejadian: tidak dikirim ulang sampai job itu kembali berisi data lalu kosong lagi.
                Riwayat dari dq_results (run CLI ikut terhitung).
+  stale      : penjaga kesegaran harian (freshness.py) menemukan job aktif yang data terbarunya terlambat.
   test       : email uji dari halaman Pengaturan.
 
 Daftar penerima & saklar di tabel settings (non-rahasia, lihat app_settings.py). Akun SMTP HANYA
@@ -290,6 +291,21 @@ def notify_run(conn: sqlite3.Connection, run_id: int) -> None:
         notify_dq_warnings(conn, run, settings, dq_rows)
     if settings["notify.on_anomaly"]:
         notify_anomalies(conn, run, settings)
+
+
+def notify_stale(conn: sqlite3.Connection, result: dict) -> None:
+    """Email penjaga kesegaran: job aktif yang belum memproses tanggal terbaru yang diharapkan."""
+    late = result["late"]
+    subject = f"{SUBJECT_PREFIX} {len(late)} job belum segar (pemeriksaan {result['date']})"
+    intro = (f"Pemeriksaan kesegaran {result['date']}: {len(late)} dari {result['checked']} job aktif belum memproses "
+             f"tanggal terbaru yang diharapkan. Cek apakah jadwal berjalan, worker aktif, dan sumber data sudah lengkap.")
+    rows = [(f["job_name"], f["cadence"], f["latest"] or "belum pernah", f["expected"]) for f in late[:50]]
+    link = _link("/jobs")
+    to = get_settings(conn, "notify.")["notify.recipients"]
+    deliver(conn, "stale", to, subject, _text(subject, intro, rows, link),
+            _html("Data terlambat", intro, rows, ("Job", "Irama", "Data terbaru", "Seharusnya"), link,
+                  "Buka Daftar Job", accent="#dc2626"),
+            job_names=[f["job_name"] for f in late])
 
 
 def send_test(conn: sqlite3.Connection, to: str, by: str) -> tuple[str, str | None]:

@@ -18,19 +18,23 @@ router = APIRouter()
 
 
 class SelectorIn(BaseModel):
-    mode: Literal["pattern", "modules", "jobs"]
+    mode: Literal["pattern", "modules", "jobs", "cadence"]
     patterns: list[str] = []
     modules: list[str] = []
     jobs: list[str] = []
+    cadences: list[Literal["daily", "weekly", "monthly", "snapshot"]] = []
 
 
 class ScheduleIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     enabled: bool = False
-    frequency: Literal["daily", "weekly"]
+    frequency: Literal["daily", "weekly", "monthly"]
     time_of_day: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     weekdays: list[int] = []
+    day_of_month: int | None = Field(None, ge=1, le=28)   # 29-31 tidak ada di semua bulan
     date_offset: int = Field(1, ge=0, le=30)
+    window_mode: Literal["offset", "last_days", "prev_week", "prev_month"] = "offset"
+    window_days: int = Field(1, ge=1, le=31)
     selector: SelectorIn
     options: RunOptionsIn = RunOptionsIn()
 
@@ -45,19 +49,28 @@ class ScheduleIn(BaseModel):
 def _validate(body: ScheduleIn) -> dict:
     if body.frequency == "weekly" and not body.weekdays:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Pilih minimal satu hari untuk jadwal mingguan.")
+    if body.frequency == "monthly" and not body.day_of_month:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Pilih tanggal (1-28) untuk jadwal bulanan.")
     sel = body.selector
-    if not {"pattern": sel.patterns, "modules": sel.modules, "jobs": sel.jobs}[sel.mode]:
+    if not {"pattern": sel.patterns, "modules": sel.modules, "jobs": sel.jobs, "cadence": sel.cadences}[sel.mode]:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cakupan job masih kosong.")
     data = body.model_dump()
     data["name"] = body.name.strip()
     data["weekdays"] = body.weekdays if body.frequency == "weekly" else []
+    data["day_of_month"] = body.day_of_month if body.frequency == "monthly" else None
+    data["window_days"] = body.window_days if body.window_mode == "last_days" else 1
     return data
+
+
+def _snapshot_count(jobs) -> int:
+    """Job snapshot (master) dalam cakupan -- di rentang > 1 hari tetap sekali, berlabel tanggal awal."""
+    return sum(1 for j in jobs if j.effective_cadence == "snapshot")
 
 
 def _enrich(s: dict, rows) -> dict:
     jobs = scheduler.resolve_selector(s["selector"], rows)
-    return {**s, "description": scheduler.describe(s), "job_count": len(jobs),
-            "job_names": [j.name for j in jobs[:50]]}
+    return {**s, "description": scheduler.describe(s), "window_label": scheduler.describe_window(s),
+            "job_count": len(jobs), "job_names": [j.name for j in jobs[:50]], "snapshot_count": _snapshot_count(jobs)}
 
 
 @router.get("")
@@ -69,7 +82,7 @@ def list_schedules(_user: dict = Depends(current_user), db: sqlite3.Connection =
 @router.post("/preview")
 def preview(selector: SelectorIn, _user: dict = Depends(current_user)):
     jobs = scheduler.resolve_selector(selector.model_dump(), load_job_rows())
-    return {"count": len(jobs), "jobs": [j.name for j in jobs[:100]]}
+    return {"count": len(jobs), "jobs": [j.name for j in jobs[:100]], "snapshot_count": _snapshot_count(jobs)}
 
 
 def _get_or_404(db, sid: int) -> dict:
