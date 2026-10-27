@@ -27,3 +27,6 @@ class Job:
     # date_check: kolom tanggal hasil harus di dalam target_date --
     # {"column": c, "min": v, "max_excl": v} (rentang) atau {"column": c, "equals": v}.
     date_check: Optional[dict] = None
+    # True = snapshot master berbasis perubahan (pipeline/snapshots.py): folder baru hanya kalau data
+    # berubah. Diisi build_job() untuk semua job ber-layout S3 master.
+    change_snapshot: bool = False

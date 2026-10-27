@@ -161,9 +161,28 @@ Contoh: `bronze/ars/hk_transactions/recorded_year=2026/recorded_month=07/recorde
 5. **`module` selalu tepat di bawah `layer`** → satu sistem mudah ditelusuri lintas layer. Kalau modul
    belum jelas, kosongkan daripada menebak — path terkunci setelah upload pertama.
 
-Master disimpan sebagai **snapshot per tanggal** (bukan satu file yang ditimpa) supaya dataset ML bisa
-direproduksi dan terlihat kapan sebuah entitas muncul atau hilang; dibaca dengan pola "ambil
-`MAX(snapshot_date)`".
+**Snapshot master berbasis perubahan** (`pipeline/snapshots.py`, semua job ber-layout master — bronze &
+gold): folder baru hanya dibuat kalau data **berubah**, dideteksi dengan hash SHA-256 seluruh data.
+
+| Kondisi run (tanggal = tanggal proses, H-1) | Tindakan di S3 |
+|---|---|
+| Hash sama dengan snapshot terakhir | Upload ke folder tanggal baru, lalu **hapus** objek folder lama ("rename" — S3 tidak punya rename; upload dulu baru hapus supaya data tidak hilang) |
+| Hash berbeda | Snapshot baru; folder lama tetap sebagai histori |
+| Tanggal sama dengan snapshot terakhir (run ulang) | Ditimpa di folder yang sama |
+| Tanggal lebih lama dari snapshot terakhir (backfill) | Tidak diupload, histori tidak diubah, peringatan DQ — data master dari sumber hanya mencerminkan kondisi sekarang |
+
+- Tanggal folder = tanggal **terakhir** versi data itu terkonfirmasi. Kondisi terbaru = `MAX(snapshot_date)`;
+  kondisi pada tanggal T = folder dengan `snapshot_date` terkecil yang ≥ T. Tanggal pertama tiap versi
+  muncul dicatat di `master_snapshots.first_seen` (tampil di detail job → Riwayat snapshot master).
+- Hash: SHA-256 per baris (data setelah konversi Arrow, tanpa `_ingested_at`), diurutkan, lalu di-hash
+  bersama nama & tipe kolom — tidak bergantung urutan baris (`SELECT` tanpa `ORDER BY`), baris dobel tetap
+  terhitung. Ditulis juga ke metadata Parquet (`pqx.data_sha256`). Biaya ±3–4 detik per 200 ribu baris.
+- Snapshot terakhir dibaca dari `master_snapshots` (bukan diunduh dari S3). Run pertama tiap job setelah
+  fitur ini aktif selalu membuat snapshot baru. Folder harian yang dibuat sebelumnya tidak disentuh.
+- Butuh izin IAM **`s3:DeleteObject`** pada prefix master. Gagal hapus → data baru tetap terupload, folder
+  lama tertinggal (dua folder isi sama) dan run diberi peringatan DQ berisi key yang perlu dihapus manual.
+- Katalog Athena/Glue: partisi master bergeser setiap hari — pakai crawler / partition projection, atau
+  sinkronkan ulang partisi kalau didaftarkan manual.
 
 ## 6. Cara ekspor berjalan
 
@@ -443,7 +462,8 @@ ada di komentar `Dockerfile.windows`.
 6. Verifikasi dari PC lain (di Windows Server 2016 port container biasanya tidak bisa dibuka lewat
    `localhost` server itu sendiri): `http://<server>:8084/api/health` harus `worker_online: true` —
    bukti kedua container berbagi `jobs.db`. Lalu jalankan satu run uji dengan toggle **Upload ke S3**
-   dimatikan. Buka port 8084 di firewall/Security Group bila perlu.
+   dimatikan. Buka port 8084 di firewall/Security Group bila perlu. Pastikan akun AWS di `.env` punya izin
+   `s3:DeleteObject` untuk prefix master (snapshot master berbasis perubahan, §5).
 7. Matikan instance lama dan task `run_exporter.bat` yang tumpang tindih (§10).
 
 **Update versi**: `git pull` → `docker build` (dengan `HOSTS_ENTRIES` yang sama) →

@@ -211,6 +211,41 @@ export default function JobDetailPage() {
             )}
           </Section>
 
+          {job.snapshots && (
+            <Section title="Riwayat snapshot master">
+              <p className="mb-3 text-xs text-gray-500">
+                Folder baru hanya dibuat saat data berubah (hash SHA-256). Selama data sama, folder versi terbaru digeser ke tanggal
+                proses terakhir — tanggal folder = terakhir terkonfirmasi.
+              </p>
+              {job.snapshots.length === 0 ? (
+                <p className="text-sm text-gray-500">Belum ada — dicatat mulai upload S3 berikutnya.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-200 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
+                        <th className="py-2 pr-4">Folder</th>
+                        <th className="py-2 pr-4">Versi sejak</th>
+                        <th className="py-2 pr-4 text-right">Baris</th>
+                        <th className="py-2">Hash</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {job.snapshots.map((s) => (
+                        <tr key={s.id}>
+                          <td className="whitespace-nowrap py-2 pr-4 font-mono text-xs text-gray-700">snapshot_date={s.snapshot_date}</td>
+                          <td className="whitespace-nowrap py-2 pr-4 text-gray-600">{fmtDate(s.first_seen)}</td>
+                          <td className="py-2 pr-4 text-right tabular-nums text-gray-600">{fmtNumber(s.rows)}</td>
+                          <td className="py-2 font-mono text-xs text-gray-500" title={s.data_hash}>{s.data_hash.slice(0, 12)}…</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
+          )}
+
           <Section title="Run terakhir (Web UI)">
             {job.recent_runs.length === 0 ? (
               <p className="text-sm text-gray-500">Belum pernah dijalankan lewat Web UI.</p>

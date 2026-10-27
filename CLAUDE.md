@@ -133,6 +133,10 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - Ekspor ad-hoc Viewer **hanya dari job terdaftar** (keputusan keamanan: login exporter bisa membaca
   tabel sensitif); tabel bebas khusus Operator/Admin. Jangan dilonggarkan tanpa persetujuan pemilik.
 - Saat menguji worker/jadwal, opsi run WAJIB `skip_s3: true` — default opsi run = upload ke S3 produksi.
+- **Snapshot master** (README §5, `pipeline/snapshots.py`): job ber-layout master (ditandai
+  `Job.change_snapshot` oleh `build_job`) hanya membuat folder baru kalau hash data berubah; data sama =
+  upload ke tanggal baru lalu HAPUS objek lama (satu-satunya tempat pipeline menghapus objek S3 — hanya key
+  yang tercatat di `master_snapshots`). Backfill tanggal lebih lama dari snapshot terakhir tidak diupload.
 - **Data quality** (README §6): pemeriksaan berat yang gagal (`dq.DQBlocked`) MENAHAN upload. String query
   template tidak diubah demi parity — `count_query` diturunkan otomatis (`count_query_for()`). Skema acuan di
   `jobs.schema_json`, diperbarui hanya setelah upload S3 sukses; lepas dengan `manage.py accept-schema <job>`.

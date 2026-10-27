@@ -274,6 +274,22 @@ CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 COMMIT;
 PRAGMA foreign_keys = ON;
 """,
+    # v9 -- snapshot master berbasis perubahan (pipeline/snapshots.py): satu baris = satu VERSI data master
+    """
+CREATE TABLE master_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name      TEXT    NOT NULL,
+    snapshot_date TEXT    NOT NULL,     -- tanggal folder S3 SAAT INI (digeser maju selama data sama)
+    s3_key        TEXT    NOT NULL,
+    data_hash     TEXT    NOT NULL,     -- SHA-256 data (snapshots.DataHasher)
+    rows          INTEGER,
+    first_seen    TEXT    NOT NULL,     -- tanggal proses pertama versi ini muncul
+    run_id        INTEGER,              -- NULL = run CLI
+    created_at    TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+CREATE INDEX ix_master_snapshots_job ON master_snapshots (job_name, snapshot_date);
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -559,6 +575,37 @@ def record_dq_result(conn: sqlite3.Connection, name: str, target_date: str, rows
 def dq_latest_rows(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
     """Jumlah baris terbaru per tanggal (bukan yang ditahan), tanggal terbaru dulu."""
     return conn.execute(_LATEST_DQ_SQL + " ORDER BY target_date DESC", (name,)).fetchall()
+
+
+def latest_master_snapshot(conn: sqlite3.Connection, name: str) -> dict | None:
+    """Versi snapshot master terakhir (snapshot_date terbesar) dari master_snapshots, atau None."""
+    r = conn.execute("SELECT * FROM master_snapshots WHERE job_name = ? ORDER BY snapshot_date DESC, id DESC LIMIT 1",
+                     (name,)).fetchone()
+    return dict(r) if r else None
+
+
+def master_snapshot_history(conn: sqlite3.Connection, name: str, limit: int = 20) -> list[dict]:
+    return [dict(r) for r in conn.execute("SELECT * FROM master_snapshots WHERE job_name = ? "
+                                          "ORDER BY snapshot_date DESC, id DESC LIMIT ?", (name, limit))]
+
+
+def save_master_snapshot(conn: sqlite3.Connection, name: str, snapshot_date: str, s3_key: str, data_hash: str,
+                         rows: int | None, first_seen: str, run_id: int | None = None,
+                         snapshot_id: int | None = None) -> bool:
+    """Versi baru (snapshot_id None) atau perbarui versi yang ada. Gagal mencatat -> False, tidak dilempar."""
+    now = utc_now()
+    try:
+        if snapshot_id is None:
+            conn.execute("INSERT INTO master_snapshots (job_name, snapshot_date, s3_key, data_hash, rows, first_seen, "
+                         "run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (name, snapshot_date, s3_key, data_hash, rows, first_seen, run_id, now, now))
+        else:
+            conn.execute("UPDATE master_snapshots SET snapshot_date = ?, s3_key = ?, data_hash = ?, rows = ?, "
+                         "first_seen = ?, run_id = ?, updated_at = ? WHERE id = ?",
+                         (snapshot_date, s3_key, data_hash, rows, first_seen, run_id, now, snapshot_id))
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def ui_edit_summary(conn: sqlite3.Connection) -> dict | None:

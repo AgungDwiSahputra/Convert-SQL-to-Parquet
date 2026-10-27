@@ -446,6 +446,10 @@ def build_job(name: str, template: str, args: dict, target_date: str) -> Job:
     if template not in TEMPLATES:
         raise ValueError(f"[{name}] template tidak dikenal: {template!r}")
     try:
-        return TEMPLATES[template](name, target_date, **args)
+        job = TEMPLATES[template](name, target_date, **args)
     except TypeError as e:  # argumen kurang/berlebih dibanding signature template
         raise ValueError(f"[{name}] argumen untuk template {template!r} tidak cocok: {e}") from None
+    # Semua job ber-layout S3 master (bronze & gold) memakai snapshot berbasis perubahan (pipeline/snapshots.py).
+    if job.s3_key is not None and (s3_target_info(template, args) or {}).get("layout") == "master":
+        job.change_snapshot = True
+    return job

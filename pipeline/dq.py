@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from pipeline import snapshots
 from pipeline.app_settings import get_settings
 from pipeline.job_store import (
     default_target_date, dq_latest_rows, get_job_row, get_schema_baseline, record_dq_result, save_schema_baseline,
@@ -97,6 +98,7 @@ class AuditContext:
     cadence: str = "daily"
     volume_history: list | None = None   # baris tanggal-tanggal sebelumnya; None = volume tidak dinilai per dataset
     rules: VolumeRules = field(default_factory=VolumeRules)
+    snapshot_prev: dict | None = None    # versi snapshot master terakhir (snapshots.py); None = belum ada
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +117,8 @@ def prepare(conn, name: str, target_date: str, cadence: str) -> AuditContext:
     if cadence in ITEM_HISTORY:
         history = [r["rows"] for r in dq_latest_rows(conn, name)
                    if r["target_date"] != target_date and r["rows"] is not None][:ITEM_HISTORY[cadence]]
-    return AuditContext(target_date, get_schema_baseline(name, conn), cadence, history, VolumeRules.load(conn))
+    return AuditContext(target_date, get_schema_baseline(name, conn), cadence, history, VolumeRules.load(conn),
+                        snapshots.latest(conn, name))
 
 
 def after_job(conn, job, ctx: AuditContext, result=None, error: Exception | None = None,
@@ -129,6 +132,7 @@ def after_job(conn, job, ctx: AuditContext, result=None, error: Exception | None
         published = result.s3_key is not None or job.s3_key is None
         if should_save_baseline(job, result, ctx):
             save_schema_baseline(job.name, report.schema, conn)
+        snapshots.record(conn, job.name, ctx.target_date, ctx.snapshot_prev, result, run_id)
     else:
         report, published = getattr(error, "report", None), False
     if report is not None:

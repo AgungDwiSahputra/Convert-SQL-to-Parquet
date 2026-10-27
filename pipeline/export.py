@@ -28,7 +28,7 @@ import pyodbc
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pipeline import dq
+from pipeline import dq, snapshots
 from pipeline.config import (
     AWS_ACCESS_KEY_ID, AWS_REGION, AWS_SECRET_ACCESS_KEY, LOG_DIR, OUTPUT_DIR, S3_BUCKET_NAME,
 )
@@ -122,6 +122,7 @@ class JobResult:
     location: str | None = None   # path file lokal; None = hanya di memori / tidak ada resultset
     s3_key: str | None = None     # terisi HANYA kalau benar-benar diupload
     dq: dq.DQReport | None = None  # hasil pemeriksaan data quality (None = tidak diaudit)
+    snapshot: dict | None = None   # job master: {action, hash, old_key} (pipeline/snapshots.py)
 
 
 def make_s3_client(skip_s3: bool):
@@ -237,6 +238,10 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     log.info("[%s] schema: %s", tag, ", ".join(f"{f.name}:{f.type}" for f in schema))
     date_idx = dq.date_column_index(data_field_names, job.date_check) if audit else None
     date_mm = dq.MinMax() if date_idx is not None else None
+    # Job master: hash data untuk snapshot berbasis perubahan (dihitung saat streaming, tanpa baca ulang).
+    hasher = snapshots.DataHasher(data_field_names, dq.schema_signature(schema)) \
+        if audit and job.change_snapshot else None
+    data_hash = None
 
     total = 0
     first_row = None
@@ -252,9 +257,14 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
             table = rows_to_table(rows, schema, ingested_at)
             if date_mm:
                 date_mm.update(table.column(date_idx))
+            if hasher:
+                hasher.update(table)
             writer.write_table(table)
             total += len(rows)
             log.info("[%s]   +%s baris (total %s)", tag, f"{len(rows):,}", f"{total:,}")
+        if hasher:
+            data_hash = hasher.hexdigest()
+            writer.add_key_value_metadata({snapshots.HASH_META_KEY: data_hash})
     finally:
         if writer is not None:
             writer.close()
@@ -282,8 +292,17 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
             raise dq.DQBlocked(report)
 
     key = None
+    snap = None
     if total > 0 and write_to_s3:
         key = job.s3_key(first_row)
+        plan = snapshots.plan(audit.snapshot_prev, audit.target_date, data_hash, key) if data_hash else None
+        if plan:
+            snap = {"action": plan.action, "hash": data_hash, "old_key": plan.old_key}
+            log.log(logging.WARNING if plan.action == "skip_backfill" else logging.INFO,
+                    "[%s] snapshot master: %s", tag, plan.message)
+            report.add("snapshot", dq.WARNING if plan.action == "skip_backfill" else dq.OK, plan.message)
+            key = plan.key
+    if key:
         log.info("[%s] upload ke s3://%s/%s ...", tag, S3_BUCKET_NAME, key)
         if use_local_file:
             s3_client.upload_file(out_path, S3_BUCKET_NAME, key)
@@ -291,9 +310,18 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
             sink.seek(0)
             s3_client.upload_fileobj(sink, S3_BUCKET_NAME, key)
         log.info("[%s] upload S3 selesai.", tag)
+        if snap and snap["old_key"]:
+            # "Rename" folder snapshot: objek lama dihapus SETELAH upload baru berhasil.
+            try:
+                s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=snap["old_key"])
+                log.info("[%s] snapshot lama dihapus: s3://%s/%s", tag, S3_BUCKET_NAME, snap["old_key"])
+            except Exception as e:  # noqa: BLE001 -- data baru sudah aman; folder ganda cukup diperingatkan
+                log.warning("[%s] gagal menghapus snapshot lama %s: %s", tag, snap["old_key"], e)
+                report.add("snapshot", dq.WARNING, f"folder snapshot lama gagal dihapus ({snap['old_key']}): "
+                                                   f"{str(e).splitlines()[0][:200]}")
     elif total > 0 and job.s3_key and s3_client is None:
         log.warning("[%s] punya s3_key tapi upload dilewati (--skip-s3 atau kredensial S3 belum lengkap).",
                     tag)
 
     return JobResult(rows=total, elapsed_s=elapsed, size_bytes=size_bytes, location=location, s3_key=key,
-                     dq=report)
+                     dq=report, snapshot=snap)

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from pipeline import freshness
 from pipeline.job_store import (
     JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, load_job_rows,
-    set_job_enabled, update_job,
+    master_snapshot_history, set_job_enabled, update_job,
 )
 from pipeline.job_templates import (
     STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, default_cadence, s3_folder, s3_target_info,
@@ -171,7 +171,8 @@ def get_job(name: str, user: dict = Depends(current_user), db: sqlite3.Connectio
     schema = json.loads(base["schema_json"]) if base["schema_json"] else None
     return {**_job_dict(row, job, user["role"], freshness.job_freshness(db, [row])[name]), "query": job.query,
             "history": job_history(db, name), "recent_runs": [dict(r) for r in recent],
-            "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None}
+            "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None,
+            "snapshots": master_snapshot_history(db, name) if job.change_snapshot else None}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
