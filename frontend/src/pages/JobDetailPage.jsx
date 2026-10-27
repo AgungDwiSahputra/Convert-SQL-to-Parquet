@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDate, fmtDateTime, fmtNumber, fmtRelative, reflow } from '../lib/format'
 import { CADENCE_LABEL, HISTORY_LABEL, STRDATE_LABEL, TYPE_LABEL, diffSnapshots, jobType } from '../lib/jobs'
-import { Alert, Badge, Button, Card, DqBadge, FreshnessBadge, LoadingBlock, Modal, StatusBadge } from '../components/ui'
+import { Alert, Badge, Button, Card, DqBadge, FreshnessBadge, GapBadge, LoadingBlock, Modal, StatusBadge } from '../components/ui'
 import { EnabledBadge } from './JobsPage'
 
 function Section({ title, icon: Icon, children, action }) {
@@ -164,6 +164,24 @@ export default function JobDetailPage() {
                       data terbaru {job.freshness.latest ? fmtDate(job.freshness.latest) : 'belum ada'} · seharusnya {fmtDate(job.freshness.expected)}
                     </span>
                   </span>
+                </Row>
+              )}
+              {job.enabled && job.freshness?.gaps && (
+                <Row label="Celah data">
+                  {job.freshness.gaps.count === 0 ? (
+                    <span className="text-gray-600">Tidak ada — semua periode di jangkauan sudah ter-load</span>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <GapBadge gaps={job.freshness.gaps} />
+                      <ul className="space-y-0.5 text-sm text-amber-800">
+                        {job.freshness.gaps.items.map((g) => <li key={g.start}>{g.label}</li>)}
+                      </ul>
+                      {job.freshness.gaps.count > job.freshness.gaps.items.length && (
+                        <p className="text-xs text-gray-500">+{job.freshness.gaps.count - job.freshness.gaps.items.length} periode lain</p>
+                      )}
+                      <p className="text-xs text-gray-500">Jalankan ulang rentang di atas dari halaman Jalankan.</p>
+                    </div>
+                  )}
                 </Row>
               )}
               <Row label="Skema acuan DQ">

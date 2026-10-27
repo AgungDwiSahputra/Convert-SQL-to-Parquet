@@ -377,8 +377,26 @@ hasil di `dq_results` yang tidak ditahan DQ dan sudah dipublikasikan atau memang
 `--skip-s3` berisi data tidak dihitung). Dibandingkan dengan tanggal yang diharapkan: harian/snapshot
 H-1, mingguan Minggu lalu, bulanan akhir bulan lalu (mulai tanggal 3). Tampil sebagai badge
 **Segar / Terlambat / Belum ada data** di Daftar Job (ada filter "Aktif · terlambat"), detail job, dan
-Beranda. **Penjaga harian** (halaman Pengaturan → Data quality, default **nonaktif**): sekali sehari
-setelah jam cek (default 06:00) mengirim email daftar job yang belum segar ke penerima tetap. Aktifkan
+Beranda.
+
+**Celah data** (`freshness.find_gaps`): periode di **tengah** riwayat yang belum ter-load walaupun data
+terbaru sudah ada (ujung yang belum diproses sudah ditandai "Terlambat"). Hari yang ditahan DQ atau hanya
+dijalankan `--skip-s3` dihitung celah. Snapshot (master) tidak dicek.
+
+| Irama | Satuan | Contoh peringatan |
+|---|---|---|
+| Harian | Tanggal | `5-6 Okt 2026 (2 hari)` |
+| Mingguan | Minggu Senin–Minggu, label minggu ke-N dalam bulan | `September 2026 minggu ke-4 (21-27 Sep 2026): 7 dari 7 hari` |
+| Bulanan | Bulan kalender | `Agustus 2026: 4 dari 31 hari` |
+
+Minggu mengikuti konvensi tabel minggu PZO (`T_PZO_Week_Temp`, cocok 100% untuk 2020–2028): minggu lintas
+bulan ikut bulan hari **Kamis**-nya. Jangkauan default 90 hari / 26 minggu / 12 bulan (Pengaturan → Data
+quality), dimulai dari tanggal pertama yang tercatat per job — riwayat sebelum `dq_results` ada tidak
+diketahui. Tampil sebagai badge **Ada celah** (Daftar Job + filter "Aktif · ada celah", detail job beserta
+daftar periodenya, Beranda) dan di email penjaga.
+
+**Penjaga harian** (halaman Pengaturan → Data quality, default **nonaktif**): sekali sehari setelah jam cek
+(default 06:00) mengirim email daftar job yang belum segar **dan yang punya celah** ke penerima tetap. Aktifkan
 setelah jadwal pindah dari Task Scheduler ke aplikasi — run di mesin lain dengan `jobs.db` lain tidak
 terlihat di sini.
 

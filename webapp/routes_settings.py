@@ -32,6 +32,9 @@ class DqIn(BaseModel):
     volume_low_pct: int = Field(50, ge=1, le=99)
     volume_high_pct: int = Field(200, ge=101, le=1000)
     volume_min_history: int = Field(7, ge=3, le=60)
+    gap_days: int = Field(90, ge=7, le=366)
+    gap_weeks: int = Field(26, ge=4, le=104)
+    gap_months: int = Field(12, ge=2, le=36)
     freshness_enabled: bool = False
     freshness_check_time: str = Field("06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -51,7 +54,9 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
                    "notify_creator": s["notify.notify_creator"],
                    "anomaly_streak": s["notify.anomaly_streak"]},
         "dq": {"volume_low_pct": d["dq.volume_low_pct"], "volume_high_pct": d["dq.volume_high_pct"],
-               "volume_min_history": d["dq.volume_min_history"], "freshness_enabled": d["freshness.enabled"],
+               "volume_min_history": d["dq.volume_min_history"], "gap_days": d["dq.gap_days"],
+               "gap_weeks": d["dq.gap_weeks"], "gap_months": d["dq.gap_months"],
+               "freshness_enabled": d["freshness.enabled"],
                "freshness_check_time": d["freshness.check_time"], "freshness_last": d["freshness.last_result"]},
         # Hanya status -- alamat server/akun SMTP sengaja tidak ditampilkan.
         "smtp": {"configured": notify.smtp_configured(), "security": SMTP_SECURITY,
@@ -80,7 +85,9 @@ def save_notify(body: NotifyIn, admin: dict = Depends(require_role("admin")), db
 @router.put("/dq")
 def save_dq(body: DqIn, admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
     set_settings(db, {"dq.volume_low_pct": body.volume_low_pct, "dq.volume_high_pct": body.volume_high_pct,
-                      "dq.volume_min_history": body.volume_min_history, "freshness.enabled": body.freshness_enabled,
+                      "dq.volume_min_history": body.volume_min_history, "dq.gap_days": body.gap_days,
+                      "dq.gap_weeks": body.gap_weeks, "dq.gap_months": body.gap_months,
+                      "freshness.enabled": body.freshness_enabled,
                       "freshness.check_time": body.freshness_check_time}, admin["username"])
     return {"ok": True}
 

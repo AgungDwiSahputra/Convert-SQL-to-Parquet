@@ -149,10 +149,20 @@ export default function SettingsPage() {
                   <span className="text-sm text-gray-500">tanggal</span>
                 </div>
               </Field>
+              <Field label="Jangkauan cek celah" hint="Periode di tengah riwayat yang belum ter-load dilaporkan sejauh ini ke belakang (dimulai dari tanggal pertama yang tercatat per job). Master tidak dicek.">
+                <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                  <input aria-label="Hari (job harian)" type="number" min={7} max={366} className={`${inputClass} w-20`} value={dqForm.gap_days} onChange={(e) => setDq('gap_days', Number(e.target.value))} />
+                  <span>hari ·</span>
+                  <input aria-label="Minggu (job mingguan)" type="number" min={4} max={104} className={`${inputClass} w-20`} value={dqForm.gap_weeks} onChange={(e) => setDq('gap_weeks', Number(e.target.value))} />
+                  <span>minggu ·</span>
+                  <input aria-label="Bulan (job bulanan)" type="number" min={2} max={36} className={`${inputClass} w-20`} value={dqForm.gap_months} onChange={(e) => setDq('gap_months', Number(e.target.value))} />
+                  <span>bulan</span>
+                </div>
+              </Field>
               <Toggle
                 id="fr-enabled"
                 label="Penjaga kesegaran harian"
-                description="Sekali sehari memeriksa apakah tiap job aktif sudah memproses tanggal terbaru (harian/snapshot: H-1, mingguan: minggu lalu, bulanan: bulan lalu) dan mengirim email ke penerima tetap kalau ada yang terlambat. Aktifkan setelah jadwal pindah dari Task Scheduler ke aplikasi."
+                description="Sekali sehari memeriksa apakah tiap job aktif sudah memproses tanggal terbaru (harian/snapshot: H-1, mingguan: minggu lalu, bulanan: bulan lalu) dan apakah ada celah di tengah riwayat, lalu mengirim email ke penerima tetap. Aktifkan setelah jadwal pindah dari Task Scheduler ke aplikasi."
                 checked={dqForm.freshness_enabled}
                 onChange={(v) => setDq('freshness_enabled', v)}
               />
@@ -163,7 +173,7 @@ export default function SettingsPage() {
               )}
               {data.dq.freshness_last && (
                 <p className="text-xs text-gray-500">
-                  Pemeriksaan terakhir {data.dq.freshness_last.date}: {data.dq.freshness_last.late.length} dari {data.dq.freshness_last.checked} job aktif belum segar.
+                  Pemeriksaan terakhir {data.dq.freshness_last.date}: {data.dq.freshness_last.late.length} dari {data.dq.freshness_last.checked} job aktif belum segar, {(data.dq.freshness_last.gaps || []).length} job ada celah.
                 </p>
               )}
               {dqMessage && <Alert tone={dqMessage.tone}>{dqMessage.text}</Alert>}

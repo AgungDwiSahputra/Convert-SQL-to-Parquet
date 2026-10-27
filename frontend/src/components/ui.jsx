@@ -189,6 +189,19 @@ export function FreshnessBadge({ freshness }) {
   )
 }
 
+// Celah data (pipeline/freshness.find_gaps): tanggal/minggu/bulan di tengah riwayat yang belum ter-load.
+export function GapBadge({ gaps }) {
+  if (!gaps?.count) return null
+  return (
+    <span
+      title={gaps.items.map((g) => g.label).join('\n')}
+      className="inline-flex items-center whitespace-nowrap rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700"
+    >
+      Ada celah · {gaps.count}
+    </span>
+  )
+}
+
 export function Badge({ children, tone = 'gray', className }) {
   return (
     <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', BADGE_TONE[tone], className)}>

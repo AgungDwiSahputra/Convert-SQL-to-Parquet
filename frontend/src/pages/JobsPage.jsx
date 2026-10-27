@@ -4,7 +4,7 @@ import { ChevronRight, Database, Lock, Plus, Search } from 'lucide-react'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { NO_MODULE, TYPE_LABEL, jobType } from '../lib/jobs'
-import { Alert, Badge, Button, Card, EmptyState, FreshnessBadge, LoadingBlock, PageHeader, inputClass } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState, FreshnessBadge, GapBadge, LoadingBlock, PageHeader, inputClass } from '../components/ui'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -42,6 +42,8 @@ export default function JobsPage() {
     return jobs.filter((j) => {
       if (status === 'late') {
         if (!j.enabled || j.freshness?.status !== 'late') return false
+      } else if (status === 'gaps') {
+        if (!j.enabled || !j.freshness?.gaps?.count) return false
       } else if (status !== 'all' && j.enabled !== (status === 'enabled')) return false
       if (moduleFilter !== 'all' && (j.s3?.module || NO_MODULE) !== moduleFilter) return false
       if (typeFilter !== 'all' && jobType(j) !== typeFilter) return false
@@ -77,6 +79,7 @@ export default function JobsPage() {
           <select aria-label="Filter status" className={selectClass} value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="enabled">Aktif</option>
             <option value="late">Aktif · terlambat</option>
+            <option value="gaps">Aktif · ada celah</option>
             <option value="disabled">Nonaktif</option>
             <option value="all">Semua status</option>
           </select>
@@ -117,7 +120,11 @@ export default function JobsPage() {
                         <p className="mt-0.5 max-w-md truncate text-xs text-gray-500">{j.template_label}</p>
                       </td>
                       <td className="px-4 py-3"><EnabledBadge enabled={j.enabled} /></td>
-                      <td className="px-4 py-3">{j.enabled ? <FreshnessBadge freshness={j.freshness} /> : <span className="text-gray-400">–</span>}</td>
+                      <td className="px-4 py-3">
+                        {j.enabled ? (
+                          <span className="flex flex-wrap gap-1.5"><FreshnessBadge freshness={j.freshness} /><GapBadge gaps={j.freshness?.gaps} /></span>
+                        ) : <span className="text-gray-400">–</span>}
+                      </td>
                       <td className="px-4 py-3 text-gray-600">{TYPE_LABEL[jobType(j)]}</td>
                       <td className="px-4 py-3"><Target job={j} /></td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{j.updated_by || '–'}</td>
@@ -135,6 +142,7 @@ export default function JobsPage() {
                       <span className="truncate font-medium text-gray-800">{j.name}</span>
                       <span className="flex shrink-0 items-center gap-1.5">
                         {j.enabled && <FreshnessBadge freshness={j.freshness} />}
+                        {j.enabled && <GapBadge gaps={j.freshness?.gaps} />}
                         <EnabledBadge enabled={j.enabled} />
                       </span>
                     </div>

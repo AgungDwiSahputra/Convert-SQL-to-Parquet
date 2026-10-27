@@ -9,7 +9,8 @@ NOTIFIKASI EMAIL -- dikirim worker.py setelah run selesai.
                berturut-turut (kasus kegagalan senyap, mis. filter tanggal salah format). Dikirim SEKALI
                per kejadian: tidak dikirim ulang sampai job itu kembali berisi data lalu kosong lagi.
                Riwayat dari dq_results (run CLI ikut terhitung).
-  stale      : penjaga kesegaran harian (freshness.py) menemukan job aktif yang data terbarunya terlambat.
+  stale      : penjaga kesegaran harian (freshness.py): job aktif yang data terbarunya terlambat / belum ada,
+               atau punya CELAH (tanggal / minggu / bulan di tengah riwayat yang belum ter-load).
   test       : email uji dari halaman Pengaturan.
 
 Daftar penerima & saklar di tabel settings (non-rahasia, lihat app_settings.py). Akun SMTP HANYA
@@ -295,17 +296,21 @@ def notify_run(conn: sqlite3.Connection, run_id: int) -> None:
 
 def notify_stale(conn: sqlite3.Connection, result: dict) -> None:
     """Email penjaga kesegaran: job aktif yang belum memproses tanggal terbaru yang diharapkan."""
-    late = result["late"]
-    subject = f"{SUBJECT_PREFIX} {len(late)} job belum segar (pemeriksaan {result['date']})"
-    intro = (f"Pemeriksaan kesegaran {result['date']}: {len(late)} dari {result['checked']} job aktif belum memproses "
-             f"tanggal terbaru yang diharapkan. Cek apakah jadwal berjalan, worker aktif, dan sumber data sudah lengkap.")
-    rows = [(f["job_name"], f["cadence"], f["latest"] or "belum pernah", f["expected"]) for f in late[:50]]
+    late, gaps = result["late"], result.get("gaps", [])
+    subject = (f"{SUBJECT_PREFIX} Kesegaran {result['date']}: {len(late)} job belum segar, "
+               f"{len(gaps)} job ada celah")
+    intro = (f"Pemeriksaan {result['date']} atas {result['checked']} job aktif. Belum segar = belum memproses tanggal "
+             f"terbaru yang diharapkan; celah = tanggal/minggu/bulan di tengah riwayat yang belum ter-load (jalankan "
+             f"ulang rentang itu dari halaman Jalankan). Cek juga jadwal, worker, dan kelengkapan sumber data.")
+    rows = [(f["job_name"], f["cadence"], "belum ada data" if f["status"] == "unknown" else "terlambat",
+             f"terbaru {f['latest'] or '-'}, seharusnya {f['expected']}") for f in late[:50]]
+    rows += [(g["job_name"], g["cadence"], f"celah ({g['count']})", "; ".join(g["items"][:6])) for g in gaps[:50]]
     link = _link("/jobs")
     to = get_settings(conn, "notify.")["notify.recipients"]
     deliver(conn, "stale", to, subject, _text(subject, intro, rows, link),
-            _html("Data terlambat", intro, rows, ("Job", "Irama", "Data terbaru", "Seharusnya"), link,
+            _html("Data terlambat / ada celah", intro, rows, ("Job", "Irama", "Masalah", "Keterangan"), link,
                   "Buka Daftar Job", accent="#dc2626"),
-            job_names=[f["job_name"] for f in late])
+            job_names=sorted({f["job_name"] for f in late} | {g["job_name"] for g in gaps}))
 
 
 def send_test(conn: sqlite3.Connection, to: str, by: str) -> tuple[str, str | None]:

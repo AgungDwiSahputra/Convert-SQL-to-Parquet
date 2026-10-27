@@ -92,7 +92,7 @@ Semua path default (`output/`, `logs/`, `jobs.db`, `backups/`) relatif ke folder
 | `pipeline/job_store.py` | Akses `jobs.db`, `build_jobs(target_date, rows)`, `default_target_date()` | Saat struktur tabel berubah |
 | `pipeline/job.py` | `@dataclass Job` — struktur satu job | Hanya kalau menambah field baru ke `Job` |
 | `pipeline/dq.py` | Data quality Bronze: jumlah baris, skema, rentang tanggal — diperiksa di `run_job()` antara tulis & upload | Saat aturan DQ berubah |
-| `pipeline/freshness.py` | Kesegaran data per job (dari `dq_results`) + penjaga harian (default nonaktif) | Saat aturan kesegaran berubah |
+| `pipeline/freshness.py` | Kesegaran data + celah (periode di tengah riwayat yang belum ter-load) per job dari `dq_results`, penjaga harian (default nonaktif) | Saat aturan kesegaran/celah berubah |
 | `pipeline/config.py` | Connection string, `BATCH_SIZE`, `COMPRESSION`, path, kredensial & setelan Web UI dari `.env` | Saat setelan global berubah |
 | `webapp/` | FastAPI: login SSO → session sendiri, API jobs/runs/users, sajikan `frontend/dist` | Fitur Web UI |
 | `pipeline/run_store.py` / `worker.py` | Antrian & riwayat run (`runs`/`run_items` di `jobs.db`) / proses eksekutornya (+ thread scheduler, notifikasi, pemeliharaan) | Mekanisme eksekusi run UI |
@@ -146,6 +146,8 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - Jadwal (skema v8): frekuensi harian/mingguan/bulanan + rentang (`window_mode`: offset / last_days /
   prev_week / prev_month) + cakupan per irama. Rentang > 1 hari: master tetap sekali berlabel tanggal awal.
   Tabel `schedules` punya CHECK — mengubah nilai yang diizinkan = bangun ulang tabel (lihat migrasi v8).
+- Label minggu di peringatan celah = konvensi tabel minggu PZO (`freshness.pzo_week`: Senin–Minggu, ikut bulan hari
+  Kamis). Tabel sumber `T_PZO_Week_Temp` punya beberapa baris 2029–2030 yang salah ketik (mis. Year 1030).
 - **Deploy Docker = Windows container** (`Dockerfile.windows`, README §11): base `servercore:ltsc2016`
   WAJIB cocok dengan host server Docker (Windows Server 2016, process isolation) — jangan ganti ke image Linux. Di dalam `RUN`
   jangan pakai kutip ganda (dibuang parsing argumen Windows sebelum PowerShell membacanya). IP untuk

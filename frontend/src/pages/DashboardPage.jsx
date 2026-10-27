@@ -4,7 +4,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateRange, fmtDateTime, fmtNumber, fmtRelative, fmtCreator, fmtUntil } from '../lib/format'
 import {
-  ACTIVE_STATUSES, Alert, Button, Card, CardHeader, EmptyState, FreshnessBadge, LoadingBlock, ProgressBar, StatCard, StatusBadge,
+  ACTIVE_STATUSES, Alert, Button, Card, CardHeader, EmptyState, FreshnessBadge, GapBadge, LoadingBlock, ProgressBar, StatCard, StatusBadge,
 } from '../components/ui'
 
 const TZ = 'Asia/Jakarta'
@@ -58,6 +58,7 @@ export default function DashboardPage() {
   const enabledJobs = jobs.filter((j) => j.enabled).length
   const lateJobs = jobs.filter((j) => j.enabled && j.freshness?.status === 'late')
   const unknownJobs = jobs.filter((j) => j.enabled && j.freshness?.status === 'unknown')
+  const gapJobs = jobs.filter((j) => j.enabled && j.freshness?.gaps?.count)
   const isOperator = hasRole(user, 'operator')
   const upcoming = (schedData?.schedules || []).filter((s) => s.enabled && s.next_run_at)
     .sort((a, b) => a.next_run_at.localeCompare(b.next_run_at)).slice(0, 3)
@@ -158,6 +159,12 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+            {gapJobs.length > 0 && (
+              <Link to="/jobs" className="flex items-center justify-between gap-3 border-b border-gray-100 bg-amber-50/60 px-5 py-2.5 text-sm hover:bg-amber-50">
+                <span className="text-amber-900"><strong>{gapJobs.length}</strong> job punya celah data (periode di tengah yang belum ter-load)</span>
+                <GapBadge gaps={{ count: gapJobs.reduce((s, j) => s + j.freshness.gaps.count, 0), items: gapJobs.flatMap((j) => j.freshness.gaps.items.map((g) => ({ label: `${j.name}: ${g.label}` }))) }} />
+              </Link>
+            )}
             {lateJobs.length === 0 ? (
               <p className="px-5 py-4 text-sm text-gray-500">{unknownJobs.length ? 'Tidak ada yang terlambat. Job "belum ada" baru tercatat setelah run pertama dengan versi ini.' : 'Semua job aktif sudah memproses data terbaru.'}</p>
             ) : (

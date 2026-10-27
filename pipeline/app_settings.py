@@ -20,6 +20,9 @@ DEFAULTS = {
     "dq.volume_low_pct": 50,        # jumlah baris < x% median riwayat -> peringatan volume
     "dq.volume_high_pct": 200,      # jumlah baris > x% median riwayat -> peringatan volume
     "dq.volume_min_history": 7,     # minimal riwayat (tanggal) sebelum volume harian/snapshot dinilai
+    "dq.gap_days": 90,              # jangkauan cek celah job harian (hari)
+    "dq.gap_weeks": 26,             # jangkauan cek celah job mingguan (minggu)
+    "dq.gap_months": 12,            # jangkauan cek celah job bulanan (bulan)
     "freshness.enabled": False,     # penjaga kesegaran harian (pipeline/freshness.py) -- default nonaktif
     "freshness.check_time": "06:00",  # jam (WIB) pemeriksaan + email job terlambat
     "freshness.last_date": None,    # tanggal (WIB) penjaga terakhir berjalan
