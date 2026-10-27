@@ -20,7 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from pipeline import run_store
 from pipeline.job_store import init_db
 from webapp import (
-    routes_adhoc, routes_auth, routes_jobs, routes_runs, routes_schedules, routes_schema, routes_settings, routes_users,
+    routes_adhoc, routes_auth, routes_dashboard, routes_jobs, routes_runs, routes_schedules, routes_schema, routes_settings,
+    routes_users,
 )
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -53,6 +54,7 @@ app.include_router(routes_schema.router, prefix="/api/schema", tags=["schema"])
 app.include_router(routes_schedules.router, prefix="/api/schedules", tags=["schedules"])
 app.include_router(routes_adhoc.router, prefix="/api/adhoc", tags=["adhoc"])
 app.include_router(routes_settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(routes_dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 
 
 @app.get("/api/health", tags=["health"])

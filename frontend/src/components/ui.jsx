@@ -336,7 +336,7 @@ export function Stat({ label, value, sub }) {
 }
 
 /** Kartu angka ringkas untuk Beranda. */
-export function StatCard({ icon, tone = 'blue', label, value, sub, onClick }) {
+export function StatCard({ icon, tone = 'blue', label, value, sub, onClick, children }) {
   const Tag = onClick ? 'button' : 'div'
   return (
     <Tag
@@ -350,8 +350,9 @@ export function StatCard({ icon, tone = 'blue', label, value, sub, onClick }) {
       <IconChip icon={icon} tone={tone} />
       <div className="w-full min-w-0">
         <p className="text-sm text-gray-500">{label}</p>
-        <p className="mt-0.5 text-xl font-semibold tabular-nums tracking-tight text-gray-800 sm:text-2xl">{value}</p>
+        <p className="mt-0.5 text-xl font-semibold tracking-tight text-gray-800 sm:text-2xl">{value}</p>
         {sub && <p className="truncate text-xs text-gray-500">{sub}</p>}
+        {children}
       </div>
     </Tag>
   )

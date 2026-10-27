@@ -312,6 +312,11 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   - Cancel saat berjalan: job yang sedang jalan diselesaikan, sisanya dibatalkan.
   - Dua run yang memakai job yang sama tidak pernah berjalan bersamaan (klaim run pakai `BEGIN IMMEDIATE`).
   - Worker mengirim heartbeat tiap 15 detik; run yang heartbeat-nya basi > 90 detik → `interrupted`.
+- **Beranda**: banner status (worker, S3, jadwal berikutnya), KPI (job aktif yang sudah memproses data
+  H-1, % lolos DQ 7 hari, run 7 hari, baris ter-load H-1), daftar **Perlu perhatian** (worker mati → run
+  gagal → ditahan DQ → terlambat → celah → peringatan DQ), grafik baris ter-load 14 hari. Ringkasan DQ &
+  grafik dari `GET /api/dashboard` (`dq_results`, hasil terbaru per job+tanggal — run ulang yang sukses
+  menutup masalah lama); kesegaran & celah dari `/api/jobs`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
   `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`. Dinaikkan otomatis saat web, worker, atau
   CLI start.
