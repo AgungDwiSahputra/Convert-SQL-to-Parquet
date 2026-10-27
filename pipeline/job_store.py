@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 from pipeline.config import JOBS_DB
 from pipeline.job import Job
-from pipeline.job_templates import build_job, s3_folder
+from pipeline.job_templates import build_job, default_cadence, s3_folder
 
 # Migrasi skema berurutan: elemen ke-N membawa database ke PRAGMA user_version = N+1.
 # Struktur berubah = TAMBAH elemen baru di akhir, jangan ubah elemen lama (database
@@ -212,6 +212,28 @@ ALTER TABLE run_items ADD COLUMN source_rows INTEGER;  -- COUNT sumber dengan fi
 ALTER TABLE run_items ADD COLUMN dq_status TEXT;       -- ok|warning|blocked|unchecked (NULL = sebelum v6)
 ALTER TABLE run_items ADD COLUMN dq_detail TEXT;       -- JSON daftar pemeriksaan
 """,
+    # v7 -- data quality tahap B: irama data per job + riwayat hasil DQ dari CLI & worker (baseline volume)
+    """
+ALTER TABLE jobs ADD COLUMN cadence TEXT;              -- daily|weekly|monthly|snapshot; NULL = tebak dari template
+CREATE TABLE dq_results (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name     TEXT    NOT NULL,
+    target_date  TEXT    NOT NULL,
+    rows         INTEGER,                         -- baris tertulis
+    source_rows  INTEGER,
+    dq_status    TEXT    NOT NULL,                -- ok|warning|blocked|unchecked
+    published    INTEGER NOT NULL DEFAULT 0,      -- 1 = sampai ke tujuan (S3; lokal untuk job tanpa S3)
+    run_id       INTEGER,                         -- NULL = run CLI (exporter.py)
+    checks       TEXT,                            -- JSON daftar pemeriksaan
+    created_at   TEXT    NOT NULL
+);
+CREATE INDEX ix_dq_results_job ON dq_results (job_name, target_date);
+-- Riwayat run Web UI sebelum v7 ikut disalin supaya baseline volume tidak mulai dari nol.
+INSERT INTO dq_results (job_name, target_date, rows, source_rows, dq_status, published, run_id, checks, created_at)
+SELECT job_name, target_date, rows, source_rows, COALESCE(dq_status, 'unchecked'),
+       CASE WHEN s3_key IS NOT NULL THEN 1 ELSE 0 END, run_id, dq_detail, COALESCE(finished_at, started_at, '')
+FROM run_items WHERE status = 'success' AND rows IS NOT NULL ORDER BY id;
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -236,10 +258,16 @@ class JobRow:
     s3_locked_at: str | None = None
     updated_by: str | None = None
     updated_at: str | None = None
+    cadence: str | None = None          # None = ditebak dari template (effective_cadence)
+
+    @property
+    def effective_cadence(self) -> str:
+        return self.cadence or default_cadence(self.template, self.args)
 
     def snapshot(self) -> dict:
         """Isi job yang dicatat di job_history (sebelum/sesudah perubahan)."""
-        return {"template": self.template, "args": self.args, "enabled": self.enabled, "notes": self.notes}
+        return {"template": self.template, "args": self.args, "enabled": self.enabled, "notes": self.notes,
+                "cadence": self.cadence}
 
 
 def default_target_date() -> str:
@@ -298,7 +326,8 @@ def write_tx(conn: sqlite3.Connection):
 def _row(r: sqlite3.Row) -> JobRow:
     keys = r.keys()
     return JobRow(r["name"], r["template"], json.loads(r["args"]), bool(r["enabled"]), r["sort_order"],
-                  r["notes"], *(r[k] if k in keys else None for k in ("s3_locked_at", "updated_by", "updated_at")))
+                  r["notes"], *(r[k] if k in keys else None
+                                for k in ("s3_locked_at", "updated_by", "updated_at", "cadence")))
 
 
 def load_job_rows(enabled_only: bool = True, path: str = JOBS_DB) -> list[JobRow]:
@@ -380,8 +409,9 @@ def create_job(conn: sqlite3.Connection, row: JobRow, by: str) -> None:
     with write_tx(conn):
         order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM jobs").fetchone()[0]
         conn.execute("INSERT INTO jobs (name, template, args, enabled, sort_order, notes, created_at, updated_at, "
-                     "updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                     (row.name, row.template, _dumps(row.args), int(row.enabled), order, row.notes, now, now, by))
+                     "updated_by, cadence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (row.name, row.template, _dumps(row.args), int(row.enabled), order, row.notes, now, now, by,
+                      row.cadence))
         _history(conn, row.name, "create", by, None, row.snapshot())
 
 
@@ -393,10 +423,10 @@ def update_job(conn: sqlite3.Connection, old: JobRow, new: JobRow, by: str, s3_m
     """
     definition_changed = new.template != old.template or new.args != old.args
     with write_tx(conn):
-        conn.execute("UPDATE jobs SET template = ?, args = ?, notes = ?, updated_at = ?, updated_by = ?, "
+        conn.execute("UPDATE jobs SET template = ?, args = ?, notes = ?, cadence = ?, updated_at = ?, updated_by = ?, "
                      "s3_locked_at = CASE WHEN ? THEN NULL ELSE s3_locked_at END, "
                      "schema_json = CASE WHEN ? THEN NULL ELSE schema_json END WHERE name = ?",
-                     (new.template, _dumps(new.args), new.notes, utc_now(), by, int(s3_moved),
+                     (new.template, _dumps(new.args), new.notes, new.cadence, utc_now(), by, int(s3_moved),
                       int(definition_changed), old.name))
         _history(conn, old.name, "s3_move" if s3_moved else "update", by, old.snapshot(),
                  {**new.snapshot(), "enabled": old.enabled})
@@ -462,6 +492,33 @@ def save_schema_baseline(name: str, schema: list | None, conn: sqlite3.Connectio
     finally:
         if own and conn is not None:
             conn.close()
+
+
+# Hasil DQ terbaru per tanggal (run ulang tanggal yang sama menimpa yang lama), selain yang ditahan.
+_LATEST_DQ_SQL = """
+SELECT target_date, rows, created_at FROM dq_results d
+WHERE job_name = ? AND dq_status != 'blocked'
+  AND id = (SELECT MAX(id) FROM dq_results WHERE job_name = d.job_name AND target_date = d.target_date
+            AND dq_status != 'blocked')
+"""
+
+
+def record_dq_result(conn: sqlite3.Connection, name: str, target_date: str, rows: int | None,
+                     source_rows: int | None, status: str, published: bool, checks: str | None,
+                     run_id: int | None = None) -> bool:
+    """Catat hasil DQ satu dataset (CLI & worker). Gagal mencatat tidak boleh menggagalkan job -> False."""
+    try:
+        conn.execute("INSERT INTO dq_results (job_name, target_date, rows, source_rows, dq_status, published, run_id, "
+                     "checks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (name, target_date, rows, source_rows, status, int(published), run_id, checks, utc_now()))
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def dq_latest_rows(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    """Jumlah baris terbaru per tanggal (bukan yang ditahan), tanggal terbaru dulu."""
+    return conn.execute(_LATEST_DQ_SQL + " ORDER BY target_date DESC", (name,)).fetchall()
 
 
 def ui_edit_summary(conn: sqlite3.Connection) -> dict | None:

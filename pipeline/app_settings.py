@@ -16,6 +16,10 @@ DEFAULTS = {
     "notify.on_anomaly": True,      # email saat job 0 baris berturut-turut
     "notify.notify_creator": True,  # pembuat run ikut dikirimi (run manual)
     "notify.anomaly_streak": 3,     # berapa tanggal berturut-turut 0 baris sebelum dianggap anomali
+    "notify.on_dq_warning": True,   # email ringkasan peringatan data quality per run (pipeline/dq.py)
+    "dq.volume_low_pct": 50,        # jumlah baris < x% median riwayat -> peringatan volume
+    "dq.volume_high_pct": 200,      # jumlah baris > x% median riwayat -> peringatan volume
+    "dq.volume_min_history": 7,     # minimal riwayat (tanggal) sebelum volume harian/snapshot dinilai
     "maintenance.last_date": None,  # tanggal (WIB) pemeliharaan harian terakhir
 }
 

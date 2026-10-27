@@ -414,6 +414,19 @@ def s3_target_info(template: str, args: dict) -> dict | None:
     return {k: spec.get(k) for k in ("layout", "layer", "module", "dataset")}
 
 
+# Irama data sumber (pipeline/dq.py): menentukan pembanding anomali volume. Disimpan per job di
+# jobs.cadence; NULL = ditebak dari template lewat default_cadence().
+CADENCES = ("daily", "weekly", "monthly", "snapshot")
+
+
+def default_cadence(template: str, args: dict) -> str:
+    """Tebakan irama dari layout S3 (harian/mingguan/master); job tanpa S3 dari needs_date."""
+    info = s3_target_info(template, args)
+    if info:
+        return {"daily": "daily", "weekly": "weekly", "master": "snapshot"}.get(info["layout"], "daily")
+    return "daily" if args.get("needs_date", True) else "snapshot"
+
+
 def s3_folder(template: str, args: dict) -> str | None:
     """
     Folder dataset di S3 (tanpa partisi & nama file), mis. 'bronze/cor/master_estate'. Dua job

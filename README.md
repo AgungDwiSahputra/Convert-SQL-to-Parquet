@@ -86,7 +86,9 @@ Tidak ada test suite otomatis. Verifikasi perubahan dengan `python exporter.py -
 
 Satu baris tabel `jobs` = satu dataset: nama + **template** + argumen JSON + aktif/nonaktif + catatan.
 `jobs.db` adalah sumber kebenaran dan diubah lewat Web UI (§9); setiap perubahan tercatat di
-`job_history`. Semua nilai yang menentukan query & path S3 (database, tabel, layer, module, dataset,
+`job_history`. Tiap job juga punya **irama data** (`jobs.cadence`: harian / mingguan / bulanan /
+snapshot) — kosong = ditebak dari template (`default_cadence()`: layout S3 harian → harian, master →
+snapshot, mingguan → mingguan). Irama menentukan pembanding anomali volume (§6). Semua nilai yang menentukan query & path S3 (database, tabel, layer, module, dataset,
 nama file, nama SP, linked server) disimpan **eksplisit per job**, jadi mengubah default di template
 tidak diam-diam memindahkan job lama. Satu-satunya setelan global yang ikut menentukan path S3:
 `S3_PREFIX`.
@@ -214,6 +216,7 @@ hanya mencerminkan load terakhir yang sukses. Riwayat eksekusi ada di Riwayat Ru
 | **Jumlah baris**: `COUNT_BIG(*)` sumber vs baris tertulis. Query hitung = query ekspor dibungkus subquery (`count_query_for()`), dijalankan tepat sebelum ekstraksi di koneksi yang sama | Beda pada job harian untuk tanggal ≤ kemarin WIB (periode tutup) | Beda pada master / tanggal yang masih berjalan; gagal menghitung |
 | **Skema** vs acuan (`jobs.schema_json` = skema terakhir yang dipublikasikan) | Kolom hilang, tipe berubah | Kolom baru |
 | **Rentang tanggal**: min/max kolom tanggal hasil vs `target_date` | Di luar tanggal proses (filter/format salah) | Kolom tidak ada / kosong semua |
+| **Volume** sesuai irama: harian & snapshot → per dataset vs median 14 tanggal terakhir (minimal 7); mingguan & bulanan → total periode lengkap (Senin–Minggu / satu bulan) vs median 8 minggu / 6 bulan, dinilai setelah run | — | Di luar 50%–200% median (ambang di tabel `settings`: `dq.volume_*`) |
 
 - Cakupan: hitung baris untuk template bronze kecuali ArcSDE; rentang tanggal untuk template harian
   kecuali `bronze_daily_join` (kolom tanggalnya di tabel induk); `sp_job`/`custom_sql` hanya skema.
@@ -223,7 +226,9 @@ hanya mencerminkan load terakhir yang sukses. Riwayat eksekusi ada di Riwayat Ru
   dilepas otomatis saat template/args job diubah. Perubahan skema sumber yang disengaja:
   `python manage.py accept-schema <job>`, lalu jalankan ulang — run berikutnya menjadi acuan baru.
 - Hasil tampil di kolom **DQ** halaman Detail Run (`run_items.dq_status`, `dq_detail`, `source_rows`) dan
-  di log (`DQ OK` / `DQ WARNING` / `DQ BLOCKED`).
+  di log (`DQ OK` / `DQ WARNING` / `DQ BLOCKED`). Setiap hasil — dari CLI maupun worker — juga dicatat di
+  tabel `dq_results` (bahan baseline volume; hasil terbaru per tanggal yang dipakai, yang ditahan tidak).
+- Peringatan dikirim sebagai **satu email ringkasan per run** (§10).
 - Biaya: satu query hitung tambahan per job — query yang sudah lambat jadi kira-kira dua kali lebih lama.
 
 **Batch size** (`-b`, default `100_000`) menentukan puncak memori (batch × lebar baris) sekaligus
@@ -288,7 +293,7 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   - Dua run yang memakai job yang sama tidak pernah berjalan bersamaan (klaim run pakai `BEGIN IMMEDIATE`).
   - Worker mengirim heartbeat tiap 15 detik; run yang heartbeat-nya basi > 90 detik → `interrupted`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
-  `schedules`, `settings`, `notifications`, `adhoc_exports`. Dinaikkan otomatis saat web, worker, atau
+  `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`. Dinaikkan otomatis saat web, worker, atau
   CLI start.
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
@@ -334,8 +339,10 @@ Jadwal baru **nonaktif**.
 > aplikasi (satu `jobs.db`) yang mengunggah ke S3.
 
 **Notifikasi email** (`pipeline/notify.py`, halaman Pengaturan, admin):
-- Dikirim saat run gagal/terputus, dan saat **anomali 0 baris**: job yang biasanya berisi data tapi N
-  tanggal terakhir (default 3) kosong — sekali per kejadian.
+- **Run gagal/terputus** — daftar eksekusi gagal (termasuk yang ditahan DQ) + peringatan DQ run itu.
+- **Peringatan data quality** — run tidak gagal tapi ada peringatan DQ: satu email ringkasan per run.
+- **Anomali 0 baris** — job berirama **harian** yang biasanya berisi data tapi N tanggal terakhir
+  (default 3) kosong; sekali per kejadian. Job mingguan/bulanan tidak ikut (wajar kosong di hari biasa).
 - Penerima = daftar tetap + pembuat run. Akun SMTP hanya di `.env` (`SMTP_*`); isi `APP_BASE_URL`
   supaya email berisi link.
 - Gagal kirim tidak memengaruhi run. Semua percobaan tercatat di tabel `notifications`; tombol

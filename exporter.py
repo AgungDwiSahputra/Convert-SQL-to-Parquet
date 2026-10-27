@@ -39,9 +39,9 @@ from pipeline import dq
 from pipeline.config import BATCH_SIZE, COMPRESSION, CONN_STR
 from pipeline.export import log, make_s3_client, run_job, setup_logging
 from pipeline.job_store import (
-    JobStoreError, build_jobs, connect, default_target_date, get_schema_baseline, init_db, load_job_rows,
-    mark_s3_uploaded, save_schema_baseline,
+    JobStoreError, build_jobs, connect, default_target_date, init_db, load_job_rows, mark_s3_uploaded,
 )
+from pipeline.run_store import open_db
 
 
 def job_matches(name: str, patterns: list[str]) -> bool:
@@ -149,6 +149,9 @@ def main() -> int:
     ok, failed = 0, 0
     date_independent_done: set[str] = set()
     stop_all = False
+    cadences = {r.name: r.effective_cadence for r in job_rows}
+    executed = {}   # job -> (irama, {tanggal sukses}) -- bahan penilaian volume per periode
+    db = open_db()  # jobs.db: skema acuan, riwayat & hasil data quality
     try:
         with pyodbc.connect(CONN_STR) as conn:
             for d in date_list:
@@ -163,26 +166,32 @@ def main() -> int:
                         continue
                     date_suffix = d.strftime("%Y%m%d") if (is_range and job.needs_date) else None
                     try:
-                        audit = dq.AuditContext(date_str, get_schema_baseline(job.name))
+                        audit = dq.prepare(db, job.name, date_str, cadences[job.name])
                         result = run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local,
                                          audit)
+                        dq.after_job(db, job, audit, result)
                         if result.s3_key:
-                            mark_s3_uploaded(job.name)  # path S3 sudah dipakai -> dikunci di Web UI
-                        if dq.should_save_baseline(job, result, audit):
-                            save_schema_baseline(job.name, result.dq.schema)
+                            mark_s3_uploaded(job.name, db)  # path S3 sudah dipakai -> dikunci di Web UI
                         ok += 1
+                        executed.setdefault(job.name, (cadences[job.name], set()))[1].add(date_str)
                         if not job.needs_date:
                             date_independent_done.add(job.name)
                     except Exception as e:  # noqa: BLE001
                         failed += 1
+                        if isinstance(e, dq.DQBlocked):
+                            dq.after_job(db, job, audit, error=e)
                         log.error("[%s] (%s) GAGAL: %s", job.name, date_str, e)
                         if args.stop_on_error:
                             log.error("Berhenti karena --stop-on-error.")
                             stop_all = True
                             break
+        for f in dq.run_period_findings(db, executed):
+            log.warning("[%s] DQ volume periode %s: %s", f["job_name"], f["period"], f["message"])
     except pyodbc.Error as e:
         log.error("Kesalahan koneksi SQL Server: %s", e)
         return 1
+    finally:
+        db.close()
 
     log.info("Ringkasan: %s job sukses, %s job gagal.", ok, failed)
     return 0 if failed == 0 else 2

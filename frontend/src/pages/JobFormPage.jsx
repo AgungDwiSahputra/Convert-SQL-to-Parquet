@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi, useDebounced } from '../lib/hooks'
 import { fmtDate, fmtNumber } from '../lib/format'
 import {
-  ADVANCED_TEMPLATES, DAILY_TEMPLATES, bronzeMode, pickArgs, suggestDataset, suggestModule, suggestName,
+  ADVANCED_TEMPLATES, CADENCE_LABEL, DAILY_TEMPLATES, bronzeMode, pickArgs, suggestDataset, suggestModule, suggestName,
 } from '../lib/jobs'
 import { Alert, Badge, Button, Card, Field, LoadingBlock, Spinner, Toggle, inputClass } from '../components/ui'
 import { ColumnSelect, DbSelect, Err, TablePicker } from '../components/schema'
@@ -232,7 +232,7 @@ export default function JobFormPage() {
   const { data: jobsData } = useApi('/jobs')
   const { data: existing, error: loadError } = useApi(isEdit ? `/jobs/${enc(editName)}` : null)
 
-  const [draft, setDraft] = useState(isEdit ? null : { name: '', template: 'bronze_daily', args: {}, notes: '' })
+  const [draft, setDraft] = useState(isEdit ? null : { name: '', template: 'bronze_daily', args: {}, notes: '', cadence: '' })
   const [touched, setTouched] = useState({})
   const [attempted, setAttempted] = useState(false)
   const [detect, setDetect] = useState(null)
@@ -250,7 +250,7 @@ export default function JobFormPage() {
   // Edit: isi form dari job yang ada (sekali).
   useEffect(() => {
     if (isEdit && existing && !draft) {
-      setDraft({ name: existing.name, template: existing.template, args: existing.args, notes: existing.notes || '' })
+      setDraft({ name: existing.name, template: existing.template, args: existing.args, notes: existing.notes || '', cadence: existing.cadence || '' })
     }
   }, [isEdit, existing, draft])
   useEffect(() => {
@@ -396,10 +396,10 @@ export default function JobFormPage() {
     setSaveError(null)
     try {
       if (isEdit) {
-        await api(`/jobs/${enc(editName)}`, { method: 'PUT', body: { template: tpl, args, notes: draft.notes, confirm_s3_move: confirmMove } })
+        await api(`/jobs/${enc(editName)}`, { method: 'PUT', body: { template: tpl, args, notes: draft.notes, cadence: draft.cadence || null, confirm_s3_move: confirmMove } })
         navigate(`/jobs/${enc(editName)}`)
       } else {
-        await api('/jobs', { method: 'POST', body: { name: draft.name, template: tpl, args, notes: draft.notes, enabled: enableNow && !!testedOk } })
+        await api('/jobs', { method: 'POST', body: { name: draft.name, template: tpl, args, notes: draft.notes, cadence: draft.cadence || null, enabled: enableNow && !!testedOk } })
         navigate(`/jobs/${enc(draft.name)}`)
       }
     } catch (e) {
@@ -662,6 +662,16 @@ export default function JobFormPage() {
           </Step>
 
           <Step n={isAdvanced ? 4 : 5} title="Simpan">
+            <Field
+              label="Irama data"
+              htmlFor="cadence"
+              hint="Seberapa sering data sumber bertambah. Menentukan pembanding anomali volume: harian & snapshot per tanggal, mingguan & bulanan per periode lengkap."
+            >
+              <select id="cadence" className={`${selectClass} sm:w-72`} value={draft.cadence} onChange={(e) => setDraft((d) => ({ ...d, cadence: e.target.value }))}>
+                <option value="">Otomatis{validation?.default_cadence ? ` (${CADENCE_LABEL[validation.default_cadence]})` : ''}</option>
+                {Object.entries(CADENCE_LABEL).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+              </select>
+            </Field>
             <Field label="Catatan (opsional)" htmlFor="notes" hint="Alasan pemilihan kolom, temuan data, dsb. — tampil di halaman detail job.">
               <textarea id="notes" rows={3} className={inputClass} value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} />
             </Field>

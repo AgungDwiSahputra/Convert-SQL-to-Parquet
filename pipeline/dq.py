@@ -9,31 +9,43 @@ DATA QUALITY BRONZE -- pemeriksaan per dataset SETELAH Parquet ditulis dan SEBEL
                 Kolom hilang / tipe berubah = DITAHAN; kolom baru = peringatan.
   date_range  : min/max kolom tanggal hasil harus di dalam target_date (job.date_check) -- filter
                 salah format = DITAHAN.
+  volume      : jumlah baris vs median riwayat sesuai IRAMA job (jobs.cadence) -- hanya peringatan.
+                Harian & snapshot: per dataset, vs 14 tanggal terakhir. Mingguan & bulanan: per PERIODE
+                (total 1 minggu / 1 bulan yang sudah lengkap) vs 8 minggu / 6 bulan sebelumnya, dinilai
+                setelah run (period_volume_findings) -- per hari volumenya memang tidak rata.
 
 Satu saja 'blocked' -> DQBlocked: upload ditahan, partisi lama di S3 tetap utuh, item dicatat gagal.
 Perubahan skema yang disengaja: `python manage.py accept-schema <job>` lalu jalankan ulang.
+Riwayat hasil (baseline volume) di tabel dq_results, diisi CLI & worker lewat after_job().
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import json
+import statistics
 from dataclasses import dataclass, field
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from pipeline.job_store import default_target_date
+from pipeline.app_settings import get_settings
+from pipeline.job_store import (
+    default_target_date, dq_latest_rows, get_job_row, get_schema_baseline, record_dq_result, save_schema_baseline,
+)
+from pipeline.job_templates import default_cadence
 
 OK, WARNING, BLOCKED, UNCHECKED = "ok", "warning", "blocked", "unchecked"
 _RANK = {UNCHECKED: 0, OK: 1, WARNING: 2, BLOCKED: 3}
 AUDIT_COLUMNS = {"_ingested_at"}     # kolom teknis pipeline, bukan dari sumber -- tidak ikut skema acuan
+ITEM_HISTORY = {"daily": 14, "snapshot": 14}     # irama yang volumenya dinilai per dataset: jumlah riwayat
+PERIOD_HISTORY = {"weekly": 8, "monthly": 6}     # irama yang volumenya dinilai per periode
 
 
 @dataclass
 class Check:
-    name: str        # rows | schema | date_range
-    status: str      # ok | warning | blocked
+    name: str        # rows | schema | date_range | volume
+    status: str      # ok | warning | blocked | unchecked (mis. riwayat volume belum cukup)
     message: str
 
 
@@ -41,6 +53,7 @@ class Check:
 class DQReport:
     checks: list[Check] = field(default_factory=list)
     source_rows: int | None = None
+    written_rows: int | None = None
     schema: list | None = None       # [[kolom, tipe], ...] hasil run ini -- calon skema acuan berikutnya
 
     def add(self, name: str, status: str, message: str) -> None:
@@ -66,9 +79,61 @@ class DQBlocked(Exception):
 
 
 @dataclass
+class VolumeRules:
+    low_pct: float = 50
+    high_pct: float = 200
+    min_history: int = 7
+
+    @classmethod
+    def load(cls, conn) -> VolumeRules:
+        s = get_settings(conn, "dq.")
+        return cls(s["dq.volume_low_pct"], s["dq.volume_high_pct"], int(s["dq.volume_min_history"]))
+
+
+@dataclass
 class AuditContext:
     target_date: str                 # tanggal proses (YYYY-MM-DD)
     schema_baseline: list | None     # jobs.schema_json; None = belum ada (run ini menjadi acuan)
+    cadence: str = "daily"
+    volume_history: list | None = None   # baris tanggal-tanggal sebelumnya; None = volume tidak dinilai per dataset
+    rules: VolumeRules = field(default_factory=VolumeRules)
+
+
+# ---------------------------------------------------------------------------
+# Dipanggil CLI (exporter.py) & worker, di sekitar run_job()
+# ---------------------------------------------------------------------------
+
+def cadence_of(conn, name: str, template: str, args: dict) -> str:
+    """Irama job saat ini (jobs.cadence, atau tebakan template kalau kosong / job sudah tidak ada)."""
+    row = get_job_row(conn, name)
+    return row.effective_cadence if row else default_cadence(template, args)
+
+
+def prepare(conn, name: str, target_date: str, cadence: str) -> AuditContext:
+    """Konteks pemeriksaan satu dataset: skema acuan, irama, riwayat volume, ambang (tabel settings)."""
+    history = None
+    if cadence in ITEM_HISTORY:
+        history = [r["rows"] for r in dq_latest_rows(conn, name)
+                   if r["target_date"] != target_date and r["rows"] is not None][:ITEM_HISTORY[cadence]]
+    return AuditContext(target_date, get_schema_baseline(name, conn), cadence, history, VolumeRules.load(conn))
+
+
+def after_job(conn, job, ctx: AuditContext, result=None, error: Exception | None = None,
+              run_id: int | None = None) -> None:
+    """
+    Setelah run_job(): catat hasil ke dq_results (baseline volume) dan perbarui skema acuan kalau data
+    sudah dipublikasikan. result = JobResult (sukses) atau error = DQBlocked (ditahan); error lain diabaikan.
+    """
+    if result is not None:
+        report = result.dq
+        published = result.s3_key is not None or job.s3_key is None
+        if should_save_baseline(job, result, ctx):
+            save_schema_baseline(job.name, report.schema, conn)
+    else:
+        report, published = getattr(error, "report", None), False
+    if report is not None:
+        record_dq_result(conn, job.name, ctx.target_date, report.written_rows, report.source_rows, report.status,
+                         published, report.to_json(), run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +190,11 @@ class MinMax:
 
 def audit(job, ctx: AuditContext, source_rows: int | None, source_error: str | None, written_rows: int,
           schema: pa.Schema, date_found: bool, date_minmax: MinMax | None) -> DQReport:
-    report = DQReport(source_rows=source_rows, schema=schema_signature(schema))
+    report = DQReport(source_rows=source_rows, written_rows=written_rows, schema=schema_signature(schema))
     _check_rows(report, job, ctx, source_rows, source_error, written_rows)
     _check_schema(report, ctx.schema_baseline)
     _check_date_range(report, job.date_check, written_rows, date_found, date_minmax)
+    _check_volume(report, ctx, written_rows)
     return report
 
 
@@ -214,6 +280,73 @@ def _check_date_range(report, spec, written_rows, date_found, mm) -> None:
         report.add("date_range", OK, f"{col} dalam rentang ({mm.min} s/d {mm.max})")
     else:
         report.add("date_range", BLOCKED, f"{col} di luar tanggal proses: {mm.min} s/d {mm.max} (harus {expected})")
+
+
+def _check_volume(report, ctx, written_rows) -> None:
+    hist = ctx.volume_history
+    if hist is None:
+        return
+    if len(hist) < ctx.rules.min_history:
+        report.add("volume", UNCHECKED, f"riwayat belum cukup ({len(hist)} dari {ctx.rules.min_history} tanggal)")
+        return
+    status, message = _volume_verdict(written_rows, hist, ctx.rules, "tanggal")
+    report.add("volume", status, message)
+
+
+def _volume_verdict(value: int, history: list, rules: VolumeRules, unit: str) -> tuple[str, str]:
+    med = statistics.median(history)
+    if med == 0:
+        return OK, f"{value:,} baris (median riwayat 0)"
+    pct = value * 100 / med
+    text = f"{value:,} baris = {pct:.0f}% dari median {med:,.0f} ({len(history)} {unit} terakhir)"
+    return (WARNING if pct < rules.low_pct or pct > rules.high_pct else OK), text
+
+
+def period_of(cadence: str, d: _dt.date) -> tuple[_dt.date, _dt.date]:
+    """Periode yang memuat tanggal d: minggu Senin-Minggu, atau satu bulan kalender."""
+    if cadence == "weekly":
+        start = d - _dt.timedelta(days=d.weekday())
+        return start, start + _dt.timedelta(days=6)
+    start = d.replace(day=1)
+    return start, (start + _dt.timedelta(days=32)).replace(day=1) - _dt.timedelta(days=1)
+
+
+def run_period_findings(conn, executed: dict) -> list[dict]:
+    """executed = {job_name: (irama, {tanggal sukses})} dari satu run -> temuan volume per periode."""
+    rules = VolumeRules.load(conn)
+    findings = []
+    for name, (cadence, dates) in executed.items():
+        findings += period_volume_findings(conn, name, cadence, dates, rules)
+    return findings
+
+
+def period_volume_findings(conn, name: str, cadence: str, target_dates, rules: VolumeRules) -> list[dict]:
+    """
+    Volume per periode untuk job mingguan/bulanan: total periode yang memuat target_dates (hanya kalau
+    periodenya LENGKAP -- semua tanggal sudah punya hasil) vs median total periode lengkap sebelumnya.
+    Return hanya temuan peringatan: [{job_name, period, message}].
+    """
+    if cadence not in PERIOD_HISTORY:
+        return []
+    totals, counts = {}, {}
+    for r in dq_latest_rows(conn, name):
+        p = period_of(cadence, _dt.date.fromisoformat(r["target_date"]))
+        totals[p] = totals.get(p, 0) + (r["rows"] or 0)
+        counts[p] = counts.get(p, 0) + 1
+    complete = {p: t for p, t in totals.items() if counts[p] == (p[1] - p[0]).days + 1}
+    unit = "minggu" if cadence == "weekly" else "bulan"
+    need = max(3, PERIOD_HISTORY[cadence] // 2)
+    findings = []
+    for p in sorted({period_of(cadence, _dt.date.fromisoformat(t)) for t in target_dates}):
+        if p not in complete:
+            continue   # periode belum lengkap -> dinilai saat sudah lengkap
+        history = [complete[q] for q in sorted(complete, reverse=True) if q[0] < p[0]][:PERIOD_HISTORY[cadence]]
+        if len(history) < need:
+            continue
+        status, message = _volume_verdict(complete[p], history, rules, unit)
+        if status == WARNING:
+            findings.append({"job_name": name, "period": f"{p[0]} s/d {p[1]}", "message": message})
+    return findings
 
 
 def _comparable(value, like):

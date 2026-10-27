@@ -105,6 +105,7 @@ export default function SettingsPage() {
                   </div>
                 </Field>
               )}
+              <Toggle id="n-dq" label="Email peringatan data quality" description="Satu email ringkasan per run kalau ada peringatan DQ (kolom baru, volume menyimpang, selisih hitungan master). Run gagal: peringatan ikut di email run gagal." checked={form.on_dq_warning} onChange={(v) => set('on_dq_warning', v)} />
               <div className="flex justify-end">
                 <Button loading={saving} onClick={save}>Simpan pengaturan</Button>
               </div>

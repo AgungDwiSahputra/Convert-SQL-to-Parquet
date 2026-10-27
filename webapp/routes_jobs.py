@@ -7,8 +7,10 @@ Lihat: viewer+. Ubah: operator+ untuk template bronze_*, admin untuk template kh
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -17,7 +19,9 @@ from pipeline.job_store import (
     JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, load_job_rows,
     set_job_enabled, update_job,
 )
-from pipeline.job_templates import STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, s3_folder, s3_target_info
+from pipeline.job_templates import (
+    STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, default_cadence, s3_folder, s3_target_info,
+)
 from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, test_run
 from webapp.deps import current_user, get_db, require_role
@@ -30,6 +34,7 @@ class JobDraft(BaseModel):
     template: str
     args: dict
     notes: str | None = Field(default=None, max_length=20_000)
+    cadence: Literal["daily", "weekly", "monthly", "snapshot"] | None = None   # None = tebak dari template
     original_name: str | None = None   # diisi saat edit
     confirm_s3_move: bool = False
 
@@ -70,6 +75,8 @@ def _job_dict(row: JobRow, job, role: str) -> dict:
         "s3_folder": s3_folder(row.template, row.args),
         "s3_key_example": s3_key,
         "s3_locked_at": row.s3_locked_at,
+        "cadence": row.cadence,
+        "cadence_effective": row.effective_cadence,
         "updated_by": row.updated_by,
         "updated_at": row.updated_at,
         "can_edit": can_edit(role, row.template),
@@ -117,7 +124,11 @@ def validate(body: JobDraft, user: dict = Depends(require_role("operator")), db:
     original = _get_or_404(db, body.original_name) if body.original_name else None
     v = validate_job(body.name, body.template, body.args, role=user["role"], rows=load_job_rows(enabled_only=False),
                      catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move)
-    return v.as_dict()
+    try:
+        cadence = default_cadence(body.template, body.args)
+    except Exception:  # noqa: BLE001 -- draf belum lengkap
+        cadence = None
+    return {**v.as_dict(), "default_cadence": cadence}
 
 
 @router.post("/test-run")
@@ -150,18 +161,21 @@ def test_run_endpoint(body: TestRunIn, user: dict = Depends(require_role("operat
 def get_job(name: str, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
     row = _get_or_404(db, name)
     job = build_jobs(default_target_date(), [row])[0]
-    recent = db.execute("SELECT i.run_id, i.target_date, i.status, i.rows, i.s3_key, i.finished_at, r.created_by "
-                        "FROM run_items i JOIN runs r ON r.id = i.run_id WHERE i.job_name = ? "
+    recent = db.execute("SELECT i.run_id, i.target_date, i.status, i.rows, i.s3_key, i.finished_at, i.dq_status, "
+                        "r.created_by FROM run_items i JOIN runs r ON r.id = i.run_id WHERE i.job_name = ? "
                         "ORDER BY i.id DESC LIMIT 10", (name,)).fetchall()
+    base = db.execute("SELECT schema_json, schema_updated_at FROM jobs WHERE name = ?", (name,)).fetchone()
+    schema = json.loads(base["schema_json"]) if base["schema_json"] else None
     return {**_job_dict(row, job, user["role"]), "query": job.query,
-            "history": job_history(db, name), "recent_runs": [dict(r) for r in recent]}
+            "history": job_history(db, name), "recent_runs": [dict(r) for r in recent],
+            "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create(body: JobCreate, user: dict = Depends(require_role("operator")), db: sqlite3.Connection = Depends(get_db)):
     _validate_or_422(body, user, db, None)
     row = JobRow(name=body.name, template=body.template, args=body.args, enabled=body.enabled,
-                 sort_order=0, notes=(body.notes or "").strip() or None)
+                 sort_order=0, notes=(body.notes or "").strip() or None, cadence=body.cadence)
     try:
         create_job(db, row, user["username"])
     except sqlite3.IntegrityError:
@@ -176,7 +190,7 @@ def update(name: str, body: JobDraft, user: dict = Depends(require_role("operato
     body.original_name = name
     v = _validate_or_422(body, user, db, old)
     new = JobRow(name=name, template=body.template, args=body.args, enabled=old.enabled,
-                 sort_order=old.sort_order, notes=(body.notes or "").strip() or None)
+                 sort_order=old.sort_order, notes=(body.notes or "").strip() or None, cadence=body.cadence)
     update_job(db, old, new, user["username"], s3_moved=v.s3_moved)
     return {"name": name, "s3_moved": v.s3_moved}
 

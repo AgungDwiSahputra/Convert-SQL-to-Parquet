@@ -75,6 +75,14 @@ export function suggestName(module, dataset) {
   return `bronze_${module ? `${module}_` : ''}${dataset}`.toLowerCase()
 }
 
+// Irama data sumber (jobs.cadence, pipeline/dq.py) -- pembanding anomali volume.
+export const CADENCE_LABEL = {
+  daily: 'Harian',
+  weekly: 'Mingguan',
+  monthly: 'Bulanan',
+  snapshot: 'Snapshot (master)',
+}
+
 export const HISTORY_LABEL = {
   import: 'Diimpor dari jobs.py',
   create: 'Dibuat',
@@ -90,9 +98,11 @@ const show = (v) => (v === undefined || v === null || v === '' ? '–' : typeof 
 export function diffSnapshots(before, after) {
   if (!before || !after) return []
   const out = []
-  for (const k of ['template', 'enabled', 'notes']) {
+  for (const k of ['template', 'enabled', 'notes', 'cadence']) {
     if (JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)) {
-      out.push({ field: k === 'notes' ? 'catatan' : k, from: k === 'notes' ? '…' : show(before[k]), to: k === 'notes' ? '(diubah)' : show(after[k]) })
+      if (k === 'notes') out.push({ field: 'catatan', from: '…', to: '(diubah)' })
+      else if (k === 'cadence') out.push({ field: 'irama', from: CADENCE_LABEL[before[k]] || 'otomatis', to: CADENCE_LABEL[after[k]] || 'otomatis' })
+      else out.push({ field: k, from: show(before[k]), to: show(after[k]) })
     }
   }
   const a = before.args || {}

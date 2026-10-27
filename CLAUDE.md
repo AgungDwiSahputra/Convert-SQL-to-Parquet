@@ -135,7 +135,9 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
 - **Data quality** (README §6): pemeriksaan berat yang gagal (`dq.DQBlocked`) MENAHAN upload. String query
   template tidak diubah demi parity — `count_query` diturunkan otomatis (`count_query_for()`). Skema acuan di
   `jobs.schema_json`, diperbarui hanya setelah upload S3 sukses; lepas dengan `manage.py accept-schema <job>`.
-  Pesan log/DQ ASCII saja (konsol cp1252).
+  CLI & worker memanggil `dq.prepare()` sebelum dan `dq.after_job()` sesudah `run_job()` — hasil masuk
+  `dq_results` (baseline volume, juga untuk run CLI). Irama job (`jobs.cadence`) menentukan pembanding
+  volume; anomali 0 baris hanya untuk irama harian. Pesan log/DQ ASCII saja (konsol cp1252).
 - **Deploy Docker = Windows container** (`Dockerfile.windows`, README §11): base `servercore:ltsc2016`
   WAJIB cocok dengan host server Docker (Windows Server 2016, process isolation) — jangan ganti ke image Linux. Di dalam `RUN`
   jangan pakai kutip ganda (dibuang parsing argumen Windows sebelum PowerShell membacanya). IP untuk

@@ -1,10 +1,14 @@
 """
 NOTIFIKASI EMAIL -- dikirim worker.py setelah run selesai.
 
-  run_failed : run gagal / terputus -> penerima tetap (+ pembuat run kalau setelan aktif)
-  anomaly    : job yang PERNAH berisi data, tapi 0 baris pada N tanggal terakhir berturut-turut
-               (kasus kegagalan senyap, mis. filter tanggal salah format). Dikirim SEKALI per
-               kejadian: tidak dikirim ulang sampai job itu kembali berisi data lalu kosong lagi.
+  run_failed : run gagal / terputus -> penerima tetap (+ pembuat run kalau setelan aktif). Peringatan
+               data quality run itu ikut dicantumkan (satu email, bukan dua).
+  dq_warning : run TIDAK gagal tapi ada peringatan data quality (pipeline/dq.py: kolom baru, volume
+               menyimpang, selisih hitungan pada master, ...) -> SATU email ringkasan per run.
+  anomaly    : job berirama HARIAN yang PERNAH berisi data, tapi 0 baris pada N tanggal terakhir
+               berturut-turut (kasus kegagalan senyap, mis. filter tanggal salah format). Dikirim SEKALI
+               per kejadian: tidak dikirim ulang sampai job itu kembali berisi data lalu kosong lagi.
+               Riwayat dari dq_results (run CLI ikut terhitung).
   test       : email uji dari halaman Pengaturan.
 
 Daftar penerima & saklar di tabel settings (non-rahasia, lihat app_settings.py). Akun SMTP HANYA
@@ -23,17 +27,15 @@ import ssl
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
-from pipeline import run_store
+from pipeline import dq, run_store
 from pipeline.app_settings import get_settings
 from pipeline.config import (
     APP_BASE_URL, SMTP_FROM, SMTP_HOST, SMTP_LOCAL_HOSTNAME, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USER,
 )
-from pipeline.job_store import utc_now
+from pipeline.job_store import dq_latest_rows, utc_now
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SUBJECT_PREFIX = "[Parquet Exporter]"
-_DAILY_TEMPLATES = ("bronze_daily", "bronze_daily_strdate", "bronze_daily_strdate_eq", "bronze_daily_epoch_ms",
-                    "bronze_daily_join")
 
 
 def smtp_configured() -> bool:
@@ -180,7 +182,35 @@ def _recipients(conn: sqlite3.Connection, run: dict, settings: dict) -> list[str
     return to
 
 
-def notify_run_failed(conn: sqlite3.Connection, run: dict, settings: dict) -> None:
+def dq_warning_rows(conn: sqlite3.Connection, run: dict) -> list[tuple[str, str, str, str]]:
+    """Peringatan data quality run ini: per item (dq_detail) + volume per periode (job mingguan/bulanan)."""
+    rows, executed = [], {}
+    for i in run["items"]:
+        if i["status"] != "success":
+            continue
+        warns = [c["message"] for c in (i.get("dq_detail") or []) if c["status"] == dq.WARNING]
+        if warns:
+            rows.append((i["job_name"], i["target_date"], "peringatan DQ", "; ".join(warns)))
+        cadence = dq.cadence_of(conn, i["job_name"], i["template"], i["args"])
+        executed.setdefault(i["job_name"], (cadence, set()))[1].add(i["target_date"])
+    rows += [(f["job_name"], f["period"], "peringatan DQ", f"volume periode: {f['message']}")
+             for f in dq.run_period_findings(conn, executed)]
+    return rows
+
+
+def notify_dq_warnings(conn: sqlite3.Connection, run: dict, settings: dict, rows: list) -> None:
+    subject = f"{SUBJECT_PREFIX} Run #{run['id']}: {len(rows)} peringatan data quality"
+    label = {"success": "sukses", "failed": "gagal", "interrupted": "terputus", "cancelled": "dibatalkan"}
+    intro = (f"Run #{run['id']} selesai {label.get(run['status'], run['status'])} ({run['ok_items']} eksekusi "
+             f"sukses), tetapi ada hasil yang perlu diperiksa. Peringatan tidak menahan upload.")
+    link = _link(f"/runs/{run['id']}")
+    deliver(conn, "dq_warning", _recipients(conn, run, settings), subject, _text(subject, intro, rows[:30], link),
+            _html("Peringatan data quality", intro, rows[:30], ("Job", "Tanggal / periode", "Status", "Keterangan"),
+                  link, f"Buka Run #{run['id']}", accent="#d97706"),
+            run_id=run["id"])
+
+
+def notify_run_failed(conn: sqlite3.Connection, run: dict, settings: dict, dq_rows: list | None = None) -> None:
     bad = [i for i in run["items"] if i["status"] in ("failed", "interrupted", "skipped", "cancelled")]
     failed = [i for i in bad if i["status"] in ("failed", "interrupted")]
     status_label = "TERPUTUS" if run["status"] == "interrupted" else "GAGAL"
@@ -191,7 +221,8 @@ def notify_run_failed(conn: sqlite3.Connection, run: dict, settings: dict) -> No
              f"{'' if run['start_date'] == run['end_date'] else ' s/d ' + run['end_date']}) selesai dengan status "
              f"{status_label}. {run['ok_items']} eksekusi sukses."
              + (f" Error run: {run['error']}" if run.get("error") else ""))
-    rows = [(i["job_name"], i["target_date"], i["status"], (i["error"] or "")[:300]) for i in bad[:30]]
+    rows = ([(i["job_name"], i["target_date"], i["status"], (i["error"] or "")[:300]) for i in bad]
+            + (dq_rows or []))[:30]
     link = _link(f"/runs/{run['id']}")
     deliver(conn, "run_failed", _recipients(conn, run, settings), subject,
             _text(subject, intro, rows, link),
@@ -200,27 +231,21 @@ def notify_run_failed(conn: sqlite3.Connection, run: dict, settings: dict) -> No
             run_id=run["id"])
 
 
-def _is_daily(template: str, args: dict) -> bool:
-    return template in _DAILY_TEMPLATES or (template in ("sp_job", "custom_sql") and args.get("needs_date", True))
-
-
 def detect_anomalies(conn: sqlite3.Connection, run: dict, streak: int) -> list[dict]:
     """
-    Job harian di run ini yang N tanggal terakhirnya (sukses) semua 0 baris, padahal sebelumnya
-    pernah berisi data, dan belum pernah diberi tahu sejak terakhir kali berisi data.
+    Job berirama HARIAN di run ini yang N tanggal terakhirnya semua 0 baris, padahal sebelumnya pernah
+    berisi data, dan belum pernah diberi tahu sejak terakhir kali berisi data. Job mingguan/bulanan tidak
+    ikut -- di hari biasa memang wajar 0 baris (volumenya dinilai per periode, lihat dq.py).
     """
     found = []
-    candidates = {i["job_name"]: i for i in run["items"] if i["status"] == "success" and i["rows"] == 0
-                  and _is_daily(i["template"], i["args"])}
+    candidates = {i["job_name"] for i in run["items"] if i["status"] == "success" and i["rows"] == 0
+                  and dq.cadence_of(conn, i["job_name"], i["template"], i["args"]) == "daily"}
     for name in candidates:
-        latest = conn.execute(
-            "SELECT target_date, MAX(rows) AS rows, MAX(finished_at) AS finished_at FROM run_items "
-            "WHERE job_name = ? AND status = 'success' GROUP BY target_date ORDER BY target_date DESC LIMIT ?",
-            (name, streak)).fetchall()
+        latest = dq_latest_rows(conn, name)[:streak]
         if len(latest) < streak or any(r["rows"] for r in latest):
             continue
-        last_data = conn.execute("SELECT MAX(finished_at) FROM run_items WHERE job_name = ? AND status = 'success' "
-                                 "AND rows > 0", (name,)).fetchone()[0]
+        last_data = conn.execute("SELECT MAX(created_at) FROM dq_results WHERE job_name = ? AND rows > 0 "
+                                 "AND dq_status != 'blocked'", (name,)).fetchone()[0]
         if not last_data:
             continue  # belum pernah berisi data sama sekali -- bukan anomali (mungkin memang tabel kosong)
         # instr, BUKAN LIKE: '_' di LIKE = wildcard satu karakter, dan nama job penuh underscore.
@@ -229,8 +254,8 @@ def detect_anomalies(conn: sqlite3.Connection, run: dict, streak: int) -> list[d
         already = conn.execute("SELECT 1 FROM notifications WHERE kind = 'anomaly' AND status = 'sent' "
                                "AND created_at >= ? AND instr(job_names, ?) > 0", (last_data, f'"{name}"')).fetchone()
         if not already:
-            last_date = conn.execute("SELECT MAX(target_date) FROM run_items WHERE job_name = ? AND status = 'success' "
-                                     "AND rows > 0", (name,)).fetchone()[0]
+            last_date = conn.execute("SELECT MAX(target_date) FROM dq_results WHERE job_name = ? AND rows > 0 "
+                                     "AND dq_status != 'blocked'", (name,)).fetchone()[0]
             found.append({"job_name": name, "dates": [r["target_date"] for r in latest], "last_data_date": last_date})
     return found
 
@@ -258,8 +283,11 @@ def notify_run(conn: sqlite3.Connection, run_id: int) -> None:
     if not run:
         return
     settings = get_settings(conn, "notify.")
+    dq_rows = dq_warning_rows(conn, run) if settings["notify.on_dq_warning"] else []
     if settings["notify.on_failed"] and run["status"] in ("failed", "interrupted"):
-        notify_run_failed(conn, run, settings)
+        notify_run_failed(conn, run, settings, dq_rows)
+    elif dq_rows:
+        notify_dq_warnings(conn, run, settings, dq_rows)
     if settings["notify.on_anomaly"]:
         notify_anomalies(conn, run, settings)
 

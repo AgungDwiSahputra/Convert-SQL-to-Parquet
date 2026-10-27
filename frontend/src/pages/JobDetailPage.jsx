@@ -5,8 +5,8 @@ import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDate, fmtDateTime, fmtNumber, fmtRelative, reflow } from '../lib/format'
-import { HISTORY_LABEL, STRDATE_LABEL, TYPE_LABEL, diffSnapshots, jobType } from '../lib/jobs'
-import { Alert, Badge, Button, Card, LoadingBlock, Modal, StatusBadge } from '../components/ui'
+import { CADENCE_LABEL, HISTORY_LABEL, STRDATE_LABEL, TYPE_LABEL, diffSnapshots, jobType } from '../lib/jobs'
+import { Alert, Badge, Button, Card, DqBadge, LoadingBlock, Modal, StatusBadge } from '../components/ui'
 import { EnabledBadge } from './JobsPage'
 
 function Section({ title, icon: Icon, children, action }) {
@@ -152,6 +152,15 @@ export default function JobDetailPage() {
                   )}
                 </Row>
               )}
+              <Row label="Irama data">
+                {CADENCE_LABEL[job.cadence_effective] || job.cadence_effective}
+                {!job.cadence && <span className="text-gray-500"> (otomatis dari template)</span>}
+              </Row>
+              <Row label="Skema acuan DQ">
+                {job.schema_baseline
+                  ? `${job.schema_baseline.columns} kolom · sejak ${fmtDateTime(job.schema_baseline.updated_at)}`
+                  : <span className="text-gray-500">Belum ada — upload S3 berikutnya menjadi acuan</span>}
+              </Row>
               <Row label="Terakhir diubah">{job.updated_by || '–'} · {fmtDateTime(job.updated_at)}</Row>
             </dl>
           </Section>
@@ -203,6 +212,7 @@ export default function JobDetailPage() {
                       <span className="text-gray-700">#{r.run_id} · {fmtDate(r.target_date)}</span>
                       <span className="flex items-center gap-2">
                         <span className="text-xs tabular-nums text-gray-500">{fmtNumber(r.rows)}</span>
+                        {r.dq_status && <DqBadge status={r.dq_status} />}
                         <StatusBadge status={r.status} />
                       </span>
                     </Link>

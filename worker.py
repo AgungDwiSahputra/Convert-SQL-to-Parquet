@@ -32,7 +32,7 @@ import pyodbc
 from pipeline import dq, maintenance, notify, run_store, scheduler
 from pipeline.config import CONN_STR
 from pipeline.export import LOG_DATEFMT, LOG_FORMAT, log, make_s3_client, run_job, setup_logging
-from pipeline.job_store import JobStoreError, get_schema_baseline, init_db, mark_s3_uploaded, save_schema_baseline
+from pipeline.job_store import JobStoreError, init_db, mark_s3_uploaded
 from pipeline.job_templates import build_job
 
 POLL_INTERVAL_S = 3
@@ -102,6 +102,7 @@ def execute_run(db, wid: str, run_id: int) -> str:
     run_store.worker_seen(db, wid, run_id)
 
     run_error = None
+    executed = {}   # job -> (irama, {tanggal sukses}) -- bahan penilaian volume per periode
     try:
         log.info("Run #%s oleh %s: %d item, tanggal %s s/d %s, opsi %s", run_id, run["created_by"],
                  len(run["items"]), run["start_date"], run["end_date"], opts)
@@ -117,11 +118,14 @@ def execute_run(db, wid: str, run_id: int) -> str:
                 run_store.start_item(db, item["id"])
                 try:
                     job = build_job(item["job_name"], item["template"], item["args"], item["target_date"])
-                    audit = dq.AuditContext(item["target_date"], get_schema_baseline(item["job_name"], db))
+                    cadence = dq.cadence_of(db, item["job_name"], item["template"], item["args"])
+                    audit = dq.prepare(db, item["job_name"], item["target_date"], cadence)
                     result = run_job(conn, job, opts["batch"], comp, s3_client, item["date_suffix"],
                                      opts["skip_local"], audit)
                 except Exception as e:  # noqa: BLE001 -- satu job gagal tidak menghentikan run
                     log.error("[%s] (%s) GAGAL: %s", item["job_name"], item["target_date"], e)
+                    if isinstance(e, dq.DQBlocked):
+                        dq.after_job(db, job, audit, error=e, run_id=run_id)
                     run_store.finish_item(db, item["id"], "failed", error=str(e),
                                           dq_report=getattr(e, "report", None))  # dq.DQBlocked membawa laporan
                     if opts["stop_on_error"]:
@@ -130,10 +134,12 @@ def execute_run(db, wid: str, run_id: int) -> str:
                         break
                 else:
                     run_store.finish_item(db, item["id"], "success", result)
+                    dq.after_job(db, job, audit, result, run_id=run_id)
                     if result.s3_key:
                         mark_s3_uploaded(item["job_name"], db)  # path S3 sudah dipakai -> dikunci
-                    if dq.should_save_baseline(job, result, audit):
-                        save_schema_baseline(item["job_name"], result.dq.schema, db)
+                    executed.setdefault(item["job_name"], (cadence, set()))[1].add(item["target_date"])
+            for f in dq.run_period_findings(db, executed):
+                log.warning("[%s] DQ volume periode %s: %s", f["job_name"], f["period"], f["message"])
     except pyodbc.Error as e:
         run_error = f"Kesalahan koneksi SQL Server: {e}"
         log.error(run_error)
