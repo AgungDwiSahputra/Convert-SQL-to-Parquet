@@ -16,3 +16,6 @@ jobs.db-shm
 backups/
 
 daftar_tabel_sumber.csv
+
+# Catatan AI lokal (tidak dibagikan)
+CLAUDE.md
