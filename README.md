@@ -473,8 +473,22 @@ build. `scripts/check_runtime.py` membuat build gagal kalau pyarrow atau ODBC Dr
 `jobs.db`, `jobs.py`, `logs/`, `output/`, dan `backups/` tidak masuk image. Alasan teknis tiap langkah
 ada di komentar `Dockerfile.windows`.
 
-**Deploy pertama** (contoh: kode di `D:\APLIKASI\parquet-exporter`, data di
-`D:\APLIKASI\parquet-exporter-data` — di luar folder kode supaya update tidak menyentuh data):
+**Struktur folder server** (data di luar folder kode supaya update tidak menyentuh data):
+
+```
+D:\APLIKASI\monitoring-datas\
+├── Application\      # kode (git clone) + .env
+└── Databases\        # di-mount ke C:\data di kedua container
+    ├── jobs.db
+    ├── logs\          # exporter_*.log, worker_*.log, runs\ (log per run)
+    ├── output\        # .parquet lokal
+    └── backups\       # backup harian jobs.db
+```
+
+PC dev memakai susunan yang sama: repo boleh di folder mana pun, tapi `.env` lokal mengarahkan
+`JOBS_DB`, `LOG_DIR`, `RUN_LOG_DIR`, `OUTPUT_DIR`, `BACKUP_DIR` ke `D:\APLIKASI\monitoring-datas\Databases`.
+
+**Deploy pertama** (perintah dijalankan dari `D:\APLIKASI\monitoring-datas\Application`):
 
 1. Ambil kode (git clone/pull).
 2. Buat `.env` dari `.env.example`. Format `--env-file`: tanpa tanda kutip, tanpa komentar di belakang
@@ -486,7 +500,7 @@ ada di komentar `Dockerfile.windows`.
    ```powershell
    python -c "import sqlite3; s = sqlite3.connect('jobs.db'); d = sqlite3.connect('jobs_pindah.db'); s.backup(d); d.close(); s.close()"
    ```
-   Salin `jobs_pindah.db` menjadi `D:\APLIKASI\parquet-exporter-data\jobs.db`.
+   Salin `jobs_pindah.db` menjadi `D:\APLIKASI\monitoring-datas\Databases\jobs.db`.
 4. Build, lalu cek jaringan dari dalam container (DNS + TCP ke SQL Server, SSO, SMTP, S3, tanpa login):
    ```powershell
    docker build -f Dockerfile.windows -t parquet-exporter .
@@ -498,7 +512,7 @@ ada di komentar `Dockerfile.windows`.
    tidak ditulis ke file Git — simpan perintah build-nya di catatan server.
 5. Jalankan:
    ```powershell
-   $data = "D:\APLIKASI\parquet-exporter-data"
+   $data = "D:\APLIKASI\monitoring-datas\Databases"
    docker run -d --name parquet-exporter-web --restart unless-stopped --env-file .env -v "${data}:C:\data" -p 8084:8000 parquet-exporter
    docker run -d --name parquet-exporter-worker --restart unless-stopped --env-file .env -v "${data}:C:\data" parquet-exporter python worker.py
    ```
@@ -521,7 +535,8 @@ docker exec parquet-exporter-worker python manage.py add-user <username.sso> --r
 docker logs --tail 100 parquet-exporter-worker
 ```
 
-Log, output lokal, dan backup harian ada di folder data host (`logs\`, `output\`, `backups\`).
+Log, output lokal, dan backup harian ada di folder data host `D:\APLIKASI\monitoring-datas\Databases`
+(`logs\`, `output\`, `backups\`).
 
 ### Tanpa Docker (Windows biasa)
 
@@ -530,13 +545,13 @@ Butuh akses jaringan ke SQL Server, S3, dan portal SSO, plus ODBC Driver 17. Iku
 
 ```powershell
 # Opsi A — NSSM (service sungguhan, restart otomatis kalau crash)
-nssm install ParquetExporterWeb    "D:\path\LoadParquetProcess\run_web.bat"
-nssm install ParquetExporterWorker "D:\path\LoadParquetProcess\run_worker.bat"
+nssm install ParquetExporterWeb    "D:\APLIKASI\monitoring-datas\Application\run_web.bat"
+nssm install ParquetExporterWorker "D:\APLIKASI\monitoring-datas\Application\run_worker.bat"
 nssm start ParquetExporterWeb; nssm start ParquetExporterWorker
 
 # Opsi B — Task Scheduler (tidak me-restart proses yang crash; pantau /api/health)
-schtasks /Create /TN "ParquetExporter\Web"    /TR "\"D:\path\LoadParquetProcess\run_web.bat\""    /SC ONSTART /RU SYSTEM /RL HIGHEST
-schtasks /Create /TN "ParquetExporter\Worker" /TR "\"D:\path\LoadParquetProcess\run_worker.bat\"" /SC ONSTART /RU SYSTEM /RL HIGHEST
+schtasks /Create /TN "ParquetExporter\Web"    /TR "\"D:\APLIKASI\monitoring-datas\Application\run_web.bat\""    /SC ONSTART /RU SYSTEM /RL HIGHEST
+schtasks /Create /TN "ParquetExporter\Worker" /TR "\"D:\APLIKASI\monitoring-datas\Application\run_worker.bat\"" /SC ONSTART /RU SYSTEM /RL HIGHEST
 ```
 
 `frontend/dist` tidak masuk Git: build di server (perlu Node.js) atau salin hasil build dari PC dev.
