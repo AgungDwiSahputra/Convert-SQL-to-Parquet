@@ -311,6 +311,9 @@ export default function DashboardPage() {
     const w = dash.warnings
     items.push({ key: 'dqw', severity: 'info', title: `${w.length}${w.length >= 20 ? '+' : ''} peringatan data quality (7 hari)`, desc: w.slice(0, 2).map((x) => `${x.job_name} ${fmtDate(x.target_date)}: ${x.message}`).join(' · '), to: w[0].run_id ? `/runs/${w[0].run_id}` : null })
   }
+  if (dash?.pending_export) {
+    items.push({ key: 'pending', severity: 'info', title: `${dash.pending_export} akun baru menunggu persetujuan Ekspor Cepat`, desc: 'Akun daftar otomatis lewat SSO (Viewer). Setujui di halaman Users kalau memang boleh mengunduh data.', to: '/users' })
+  }
   if (unknown.length) {
     items.push({ key: 'unknown', severity: 'info', title: `${unknown.length} job aktif belum pernah diproses`, desc: 'Tercatat setelah run pertama dengan versi terbaru — atau periksa jadwalnya.', to: '/jobs' })
   }

@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends
 
 from pipeline.job_store import default_target_date
-from webapp.deps import current_user, get_db
+from webapp.deps import ROLE_RANK, current_user, get_db
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ def _messages(checks: str | None, status: str) -> str:
 
 
 @router.get("")
-def summary(_user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+def summary(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
     data_date = date.fromisoformat(default_target_date())
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
     recent = db.execute(_LATEST + " AND d.created_at >= ? ORDER BY d.target_date DESC, d.job_name", (since,)).fetchall()
@@ -60,4 +60,7 @@ def summary(_user: dict = Depends(current_user), db: sqlite3.Connection = Depend
         "blocked": issues["blocked"][:20],
         "warnings": issues["warning"][:20],
         "daily": [{"date": d, **v} for d, v in by_day.items()],
+        # Khusus admin: akun daftar otomatis (SSO) yang menunggu persetujuan Ekspor Cepat.
+        "pending_export": db.execute("SELECT COUNT(*) FROM users WHERE role = 'viewer' AND active = 1 AND can_export = 0")
+        .fetchone()[0] if ROLE_RANK[user["role"]] >= ROLE_RANK["admin"] else None,
     }

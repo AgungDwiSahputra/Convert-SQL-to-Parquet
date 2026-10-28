@@ -6,7 +6,8 @@ EKSPOR CEPAT (ad-hoc): download .parquet langsung dari browser, TANPA membuat jo
                          tidak dijadikan job tidak bisa diambil Viewer.
   /table (operator+)  : tabel bebas (opsional difilter kolom tanggal datetime). Divalidasi aturan
                          yang sama dengan wizard job (identifier dicek ke SQL Server).
-Job bertemplate khusus admin (mis. sp_job = menjalankan ETL Load) hanya bisa diunduh admin.
+Job bertemplate khusus admin (mis. sp_job = menjalankan ETL Load) hanya bisa diunduh admin. Viewer yang
+daftar otomatis lewat SSO (users.can_export = 0) belum bisa memakai /job sampai admin menyetujuinya.
 Batas ADHOC_MAX_ROWS baris; setiap download tercatat di tabel adhoc_exports.
 """
 
@@ -28,7 +29,7 @@ from pipeline.job_store import build_jobs, default_target_date, get_job_row, loa
 from pipeline.job_templates import build_job
 from pipeline.job_validation import ROLE_RANK, TEMPLATE_SPECS, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, export_parquet
-from webapp.deps import current_user, get_db, require_role
+from webapp.deps import can_quick_export, current_user, get_db, require_role
 
 router = APIRouter()
 
@@ -79,7 +80,8 @@ def _run_export(db, user, job, mode, source, target_date, filename) -> FileRespo
 
 @router.get("/meta")
 def meta(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    rows = load_job_rows()
+    allowed = can_quick_export(user)
+    rows = load_job_rows() if allowed else []
     example = default_target_date()
     jobs = []
     for r, j in zip(rows, build_jobs(example, rows)):
@@ -88,11 +90,14 @@ def meta(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(ge
                          "table": r.args.get("table"), "db": r.args.get("db")})
     mine = db.execute("SELECT * FROM adhoc_exports WHERE username = ? ORDER BY id DESC LIMIT 15",
                       (user["username"],)).fetchall()
-    return {"max_rows": ADHOC_MAX_ROWS, "default_date": example, "jobs": jobs, "history": [dict(m) for m in mine]}
+    return {"max_rows": ADHOC_MAX_ROWS, "default_date": example, "jobs": jobs, "history": [dict(m) for m in mine],
+            "export_allowed": allowed}
 
 
 @router.post("/job")
 def export_job(body: JobExportIn, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    if not can_quick_export(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Ekspor Cepat untuk akun ini menunggu persetujuan admin.")
     row = get_job_row(db, body.job_name)
     if row is None or not row.enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Job aktif '{body.job_name}' tidak ditemukan.")

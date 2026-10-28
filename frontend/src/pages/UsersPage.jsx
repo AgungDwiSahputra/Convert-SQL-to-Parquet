@@ -4,10 +4,10 @@ import { api } from '../lib/api'
 import { ROLE_LABEL, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateTime, fmtRelative } from '../lib/format'
-import { Alert, Button, Card, EmptyState, Field, LoadingBlock, PageHeader, inputClass } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState, Field, LoadingBlock, PageHeader, inputClass } from '../components/ui'
 
 const ROLES = [
-  ['viewer', 'Melihat daftar job, riwayat run, dan log.'],
+  ['viewer', 'Melihat daftar job, riwayat run, dan log. Ekspor Cepat dari job terdaftar setelah disetujui admin (saklar Ekspor).'],
   ['operator', 'Viewer + menjalankan, membatalkan, dan mengulang run.'],
   ['admin', 'Operator + mengelola user aplikasi.'],
 ]
@@ -38,6 +38,7 @@ export default function UsersPage() {
   const [busyUser, setBusyUser] = useState(null)
   const [message, setMessage] = useState(null) // {tone, text}
   const users = data?.users || []
+  const pending = users.filter((u) => u.active && u.role === 'viewer' && !u.can_export)
 
   const add = async (e) => {
     e.preventDefault()
@@ -99,6 +100,11 @@ export default function UsersPage() {
         <div className="space-y-4 lg:col-span-2">
           {message && <Alert tone={message.tone}>{message.text}</Alert>}
           {error && <Alert tone="error">{error.message}</Alert>}
+          {pending.length > 0 && (
+            <Alert tone="warning" title={`${pending.length} akun menunggu persetujuan Ekspor Cepat`}>
+              Akun yang daftar otomatis lewat SSO masuk sebagai Viewer tanpa Ekspor Cepat. Nyalakan saklar <strong>Ekspor</strong> untuk menyetujui.
+            </Alert>
+          )}
           <Card className="overflow-hidden">
             {loading && !data ? (
               <LoadingBlock />
@@ -112,30 +118,47 @@ export default function UsersPage() {
                       <p className="truncate font-medium text-gray-800">
                         {u.full_name || u.username}
                         {u.username === me.username && <span className="ml-2 text-xs font-normal text-brand-600">(Anda)</span>}
+                        {u.created_by === 'sso-auto' && <Badge tone="blue" className="ml-2 align-middle">Daftar otomatis</Badge>}
                       </p>
                       <p className="truncate text-xs text-gray-500">
                         {u.username}{u.email ? ` · ${u.email}` : ''}
                       </p>
                       <p className="mt-0.5 text-xs text-gray-400" title={u.last_login_at ? fmtDateTime(u.last_login_at) : undefined}>
-                        {u.last_login_at ? `Login terakhir ${fmtRelative(u.last_login_at)}` : 'Belum pernah login'} · ditambahkan {u.created_by || '–'}
+                        {u.last_login_at ? `Login terakhir ${fmtRelative(u.last_login_at)}` : 'Belum pernah login'} · {u.created_by === 'sso-auto' ? 'daftar sendiri lewat SSO' : `ditambahkan ${u.created_by || '–'}`}
                       </p>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <select
-                        aria-label={`Role ${u.username}`}
-                        className={`${selectClass} w-36`}
-                        value={u.role}
-                        disabled={busyUser === u.username}
-                        onChange={(e) => update(u, { role: e.target.value })}
-                      >
-                        {ROLES.map(([r]) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
-                      </select>
-                      <ActiveSwitch
-                        active={u.active}
-                        disabled={busyUser === u.username}
-                        label={`${u.active ? 'Nonaktifkan' : 'Aktifkan'} ${u.username}`}
-                        onChange={(v) => update(u, { active: v })}
-                      />
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div className="w-36 shrink-0">
+                        <select
+                          aria-label={`Role ${u.username}`}
+                          className={selectClass}
+                          value={u.role}
+                          disabled={busyUser === u.username}
+                          onChange={(e) => update(u, { role: e.target.value })}
+                        >
+                          {ROLES.map(([r]) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+                        </select>
+                      </div>
+                      {u.role === 'viewer' && (
+                        <span className="flex items-center gap-2 text-xs text-gray-600" title="Ekspor Cepat dari job terdaftar">
+                          <ActiveSwitch
+                            active={u.can_export}
+                            disabled={busyUser === u.username || !u.active}
+                            label={`${u.can_export ? 'Cabut' : 'Setujui'} Ekspor Cepat ${u.username}`}
+                            onChange={(v) => update(u, { can_export: v })}
+                          />
+                          Ekspor
+                        </span>
+                      )}
+                      <span className="flex items-center gap-2 text-xs text-gray-600">
+                        <ActiveSwitch
+                          active={u.active}
+                          disabled={busyUser === u.username}
+                          label={`${u.active ? 'Nonaktifkan' : 'Aktifkan'} ${u.username}`}
+                          onChange={(v) => update(u, { active: v })}
+                        />
+                        Aktif
+                      </span>
                     </div>
                   </li>
                 ))}

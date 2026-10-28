@@ -1,6 +1,6 @@
 """
 Pengaturan aplikasi (khusus admin): penerima & saklar notifikasi email, email uji, riwayat
-notifikasi, status pemeliharaan, data quality & inventaris S3. Akun SMTP TIDAK bisa dilihat/diubah di sini -- hanya di .env server.
+notifikasi, status pemeliharaan, data quality & inventaris S3, pendaftaran otomatis akun SSO. Akun SMTP TIDAK bisa dilihat/diubah di sini -- hanya di .env server.
 """
 
 from __future__ import annotations
@@ -42,6 +42,10 @@ class DqIn(BaseModel):
     s3inv_scan_time: str = Field("05:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
+class AuthIn(BaseModel):
+    auto_viewer: bool = True
+
+
 class TestEmailIn(BaseModel):
     to: str | None = None
 
@@ -66,6 +70,9 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
         # Hanya status -- alamat server/akun SMTP sengaja tidak ditampilkan.
         "smtp": {"configured": notify.smtp_configured(), "security": SMTP_SECURITY,
                  "from_matches_login": notify.from_matches_login()},
+        "auth": {"auto_viewer": get_settings(db, "auth.")["auth.auto_viewer"],
+                 "pending_export": db.execute("SELECT COUNT(*) FROM users WHERE role = 'viewer' AND active = 1 "
+                                              "AND can_export = 0").fetchone()[0]},
         "app_base_url": APP_BASE_URL,
         "maintenance": {"last": maintenance.last_result(db), "backup_keep": BACKUP_KEEP,
                         "log_retention_days": LOG_RETENTION_DAYS},
@@ -95,6 +102,12 @@ def save_dq(body: DqIn, admin: dict = Depends(require_role("admin")), db: sqlite
                       "freshness.enabled": body.freshness_enabled,
                       "freshness.check_time": body.freshness_check_time, "s3inv.enabled": body.s3inv_enabled,
                       "s3inv.scan_time": body.s3inv_scan_time}, admin["username"])
+    return {"ok": True}
+
+
+@router.put("/auth")
+def save_auth(body: AuthIn, admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
+    set_settings(db, {"auth.auto_viewer": body.auto_viewer}, admin["username"])
     return {"ok": True}
 
 

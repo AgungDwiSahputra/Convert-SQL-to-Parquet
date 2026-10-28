@@ -3,7 +3,9 @@ LOGIN via SSO portal.
 
   1. Browser mengirim username/password ke /api/auth/login (aplikasi ini).
   2. Server meneruskannya ke SSO {SSO_BASE_URL}/api/auth/gettoken. Password TIDAK disimpan / di-log.
-  3. user_name hasil SSO harus TERDAFTAR & AKTIF di tabel users (role diatur admin aplikasi).
+  3. user_name hasil SSO dicari di tabel users. Belum terdaftar + saklar auth.auto_viewer aktif (Pengaturan)
+     -> didaftarkan otomatis sebagai Viewer (created_by 'sso-auto', can_export 0: Ekspor Cepat menunggu
+     persetujuan admin). Saklar mati -> harus didaftarkan admin dulu. Akun NONAKTIF selalu ditolak.
   4. Nama lengkap & email diambil dari SSO /api/cor/user -- hanya dua field itu yang disimpan;
      data pribadi lain di response (NIK, No. KTP, dst.) diabaikan.
   5. Aplikasi membuat session SENDIRI (cookie HttpOnly). Token SSO hanya dipakai sesaat di
@@ -23,8 +25,10 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from pipeline.config import COOKIE_SECURE, SESSION_HOURS, SSO_BASE_URL
+from pipeline.app_settings import get_settings
 from pipeline.job_store import utc_now
 from webapp.deps import SESSION_COOKIE, current_user, get_db, hash_token
+from webapp.routes_users import USERNAME_RE
 
 router = APIRouter()
 
@@ -34,6 +38,7 @@ _sso = httpx.Client(timeout=15)
 # Batas percobaan login gagal per (IP, username) -- di memori proses, cukup untuk tool internal.
 _MAX_FAILED, _FAILED_WINDOW_S = 5, 600
 _failed: dict[str, list[float]] = {}
+AUTO_CREATOR = "sso-auto"   # users.created_by untuk akun yang daftar otomatis saat login pertama
 
 
 def _too_many_failures(key: str) -> bool:
@@ -93,9 +98,15 @@ def login(body: LoginIn, request: Request, response: Response, db: sqlite3.Conne
 
     username = str(sso.get("user_name") or typed).strip().lower()
     user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    if user is None or not user["active"]:
+    if user is None and USERNAME_RE.fullmatch(username) and get_settings(db, "auth.")["auth.auto_viewer"]:
+        db.execute("INSERT OR IGNORE INTO users (username, role, active, can_export, created_at, created_by) "
+                   "VALUES (?, 'viewer', 1, 0, ?, ?)", (username, utc_now(), AUTO_CREATOR))
+        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if user is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             f"Akun '{username}' belum terdaftar di aplikasi ini. Minta admin untuk menambahkan.")
+    if not user["active"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Akun '{username}' dinonaktifkan di aplikasi ini. Hubungi admin.")
 
     profile = _sso_profile(sso["access_token"], sso.get("user_id"))
     full_name = profile.get("UserFullName") or profile.get("Nama") or user["full_name"]
@@ -111,7 +122,8 @@ def login(body: LoginIn, request: Request, response: Response, db: sqlite3.Conne
                (full_name, email, utc_now(), username))
     response.set_cookie(SESSION_COOKIE, token, max_age=int(SESSION_HOURS * 3600), httponly=True,
                         samesite="lax", secure=COOKIE_SECURE, path="/")
-    return {"username": username, "full_name": full_name, "email": email, "role": user["role"]}
+    return {"username": username, "full_name": full_name, "email": email, "role": user["role"],
+            "can_export": bool(user["can_export"])}
 
 
 @router.post("/logout")

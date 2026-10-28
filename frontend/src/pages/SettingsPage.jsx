@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Bell, HardDrive, Mail, RefreshCw, Send, ShieldCheck } from 'lucide-react'
+import { Link } from 'react-router'
+import { Bell, HardDrive, KeyRound, Mail, RefreshCw, Send, ShieldCheck } from 'lucide-react'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
@@ -26,6 +27,8 @@ export default function SettingsPage() {
   const [dqMessage, setDqMessage] = useState(null)
   const [scanning, setScanning] = useState(false)
   const [scanResult, setScanResult] = useState(null)
+  const [autoViewer, setAutoViewer] = useState(null)
+  const [authMessage, setAuthMessage] = useState(null)
 
   useEffect(() => {
     if (data && !form) {
@@ -33,7 +36,8 @@ export default function SettingsPage() {
       setRecipientsText(data.notify.recipients.join('\n'))
     }
     if (data && !dqForm) setDqForm(data.dq)
-  }, [data, form, dqForm])
+    if (data && autoViewer === null) setAutoViewer(data.auth.auto_viewer)
+  }, [data, form, dqForm, autoViewer])
 
   if ((loading && !data) || !form || !dqForm) return error ? <Alert tone="error">{error.message}</Alert> : <LoadingBlock />
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
@@ -50,6 +54,18 @@ export default function SettingsPage() {
       setDqMessage({ tone: 'error', text: e.message })
     } finally {
       setDqSaving(false)
+    }
+  }
+
+  const saveAuth = async (v) => {
+    setAutoViewer(v)
+    setAuthMessage(null)
+    try {
+      await api('/settings/auth', { method: 'PUT', body: { auto_viewer: v } })
+      setAuthMessage({ tone: 'info', text: v ? 'Akun SSO baru otomatis masuk sebagai Viewer.' : 'Akun baru harus ditambahkan admin di halaman Users.' })
+    } catch (e) {
+      setAutoViewer(!v)
+      setAuthMessage({ tone: 'error', text: e.message })
     }
   }
 
@@ -252,6 +268,26 @@ export default function SettingsPage() {
         </div>
 
         <div className="space-y-6 lg:col-span-2">
+          <Card className="overflow-hidden">
+            <CardHeader icon={KeyRound} title="Akses login" description="Siapa yang bisa masuk dengan akun SSO" />
+            <div className="space-y-4 p-5">
+              <Toggle
+                id="auth-auto"
+                label="Akun SSO baru otomatis Viewer"
+                description="Siapa pun yang berhasil login SSO langsung masuk sebagai Viewer. Ekspor Cepat untuk akun ini baru bisa dipakai setelah admin menyetujuinya di halaman Users. Matikan supaya hanya akun yang ditambahkan admin yang bisa masuk (akun yang sudah terdaftar tetap bisa — nonaktifkan di Users)."
+                checked={!!autoViewer}
+                onChange={saveAuth}
+              />
+              {data.auth.pending_export > 0 && (
+                <p className="text-sm text-gray-600">
+                  <span className="font-semibold text-amber-700">{data.auth.pending_export} akun</span> menunggu persetujuan Ekspor Cepat ·{' '}
+                  <Link to="/users" className="font-medium text-brand-700 hover:underline">Buka Users</Link>
+                </p>
+              )}
+              {authMessage && <Alert tone={authMessage.tone}>{authMessage.text}</Alert>}
+            </div>
+          </Card>
+
           <Card className="overflow-hidden">
             <CardHeader icon={Send} title="Kirim email uji" description="Memastikan setelan SMTP benar" />
             <div className="space-y-4 p-5">

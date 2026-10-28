@@ -133,6 +133,8 @@ Hal-hal penting yang tidak boleh diubah sembarangan (detail & alasan lengkap di 
   dokumen, database (`settings` hanya untuk nilai non-rahasia), atau ditampilkan di UI/API.
 - Ekspor ad-hoc Viewer **hanya dari job terdaftar** (keputusan keamanan: login exporter bisa membaca
   tabel sensitif); tabel bebas khusus Operator/Admin. Jangan dilonggarkan tanpa persetujuan pemilik.
+  Akun SSO yang daftar otomatis (saklar `auth.auto_viewer`) = Viewer dengan `users.can_export = 0`: Ekspor
+  Cepat baru setelah admin menyetujui (`webapp.deps.can_quick_export`). Akun nonaktif selalu ditolak login.
 - Saat menguji worker/jadwal, opsi run WAJIB `skip_s3: true` — default opsi run = upload ke S3 produksi.
 - **Snapshot master** (README §5, `pipeline/snapshots.py`): job ber-layout master (ditandai
   `Job.change_snapshot` oleh `build_job`) hanya membuat folder baru kalau hash data berubah; data sama =

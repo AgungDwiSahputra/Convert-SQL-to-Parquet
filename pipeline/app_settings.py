@@ -31,6 +31,7 @@ DEFAULTS = {
     "s3inv.scan_time": "05:30",     # jam (WIB) pindai harian -- sebelum penjaga kesegaran
     "s3inv.last_date": None,        # tanggal (WIB) pindai harian terakhir
     "s3inv.last_result": None,      # ringkasan pindai terakhir (harian / manual)
+    "auth.auto_viewer": True,       # akun SSO yang belum terdaftar otomatis masuk sebagai Viewer (Ekspor Cepat menunggu admin)
     "maintenance.last_date": None,  # tanggal (WIB) pemeliharaan harian terakhir
 }
 

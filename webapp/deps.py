@@ -32,13 +32,18 @@ def current_user(pqx_session: str | None = Cookie(default=None),
     """User aktif pemilik cookie session. Role dibaca ulang tiap request -> perubahan role/nonaktif langsung berlaku."""
     if pqx_session:
         row = db.execute(
-            "SELECT u.username, u.full_name, u.email, u.role FROM sessions s "
+            "SELECT u.username, u.full_name, u.email, u.role, u.can_export FROM sessions s "
             "JOIN users u ON u.username = s.username "
             "WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
             (hash_token(pqx_session), utc_now())).fetchone()
         if row:
-            return dict(row)
+            return dict(row, can_export=bool(row["can_export"]))
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Belum login atau session sudah habis.")
+
+
+def can_quick_export(user: dict) -> bool:
+    """Ekspor Cepat: operator+ selalu; viewer hanya kalau disetujui admin (akun daftar otomatis SSO = belum)."""
+    return ROLE_RANK[user["role"]] >= ROLE_RANK["operator"] or bool(user.get("can_export"))
 
 
 def require_role(minimum: str):

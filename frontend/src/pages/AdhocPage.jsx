@@ -95,6 +95,17 @@ export default function AdhocPage() {
   const { data: cols } = useApi(tab === 'table' && db && table ? `/schema/columns?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}` : null)
 
   if (loading && !meta) return <LoadingBlock />
+  if (meta && !meta.export_allowed) {
+    return (
+      <>
+        <PageHeader title="Ekspor Cepat" description="Unduh data sebagai .parquet langsung dari SQL Server — tanpa membuat job dan tanpa menyentuh S3 datalake." />
+        <Alert tone="warning" title="Menunggu persetujuan admin">
+          Akun Anda masuk otomatis sebagai Viewer lewat SSO. Ekspor Cepat bisa dipakai setelah admin aplikasi menyetujuinya
+          di halaman Users. Daftar job, riwayat run, dan log tetap bisa dilihat.
+        </Alert>
+      </>
+    )
+  }
   const job = meta?.jobs.find((j) => j.name === jobName)
   const theDate = date || meta?.default_date
 

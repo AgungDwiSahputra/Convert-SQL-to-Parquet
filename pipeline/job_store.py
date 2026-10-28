@@ -302,6 +302,11 @@ CREATE TABLE s3_inventory (
     PRIMARY KEY (job_name, target_date)
 );
 """,
+    # v11 -- akun SSO daftar otomatis sebagai Viewer (webapp/routes_auth.py). User lama = didaftarkan admin = boleh
+    # Ekspor Cepat; akun daftar otomatis diisi 0 sampai admin menyetujui (operator+ tidak bergantung kolom ini).
+    """
+ALTER TABLE users ADD COLUMN can_export INTEGER NOT NULL DEFAULT 1;
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

@@ -299,10 +299,16 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
 ```
 
 - **Login** lewat portal SSO → session aplikasi sendiri (cookie HttpOnly, token disimpan sebagai
-  hash). Hanya username yang terdaftar & aktif di tabel `users` yang bisa masuk; dari profil SSO hanya
-  nama & email yang disimpan. Batas 5× gagal / 10 menit per (IP, username).
+  hash). Dari profil SSO hanya nama & email yang disimpan. Batas 5× gagal / 10 menit per (IP, username).
+  - Akun SSO yang **belum terdaftar** otomatis dibuat sebagai `viewer` (`created_by = sso-auto`) selama
+    saklar **Akun SSO baru otomatis Viewer** di Pengaturan → Akses login aktif (default). Saklar mati =
+    hanya akun yang ditambahkan admin yang bisa masuk; akun yang sudah terdaftar tetap bisa.
+  - Akun **nonaktif** selalu ditolak — cara admin memblokir orang tertentu.
 - **Role**: `viewer` (lihat; Ekspor Cepat dari job terdaftar), `operator` (+ jalankan/batalkan/ulangi
   run, kelola job bronze & jadwal, ekspor tabel bebas), `admin` (+ template khusus admin, user, pengaturan).
+  Viewer yang daftar otomatis belum boleh Ekspor Cepat (`users.can_export = 0`) sampai admin menyalakan
+  saklar **Ekspor** di halaman Users; jumlah yang menunggu tampil di Users, Pengaturan, dan Beranda admin.
+  User yang ditambahkan admin langsung boleh.
 - **Run** dibuat dari halaman Jalankan atau dari jadwal. Semantiknya sama dengan CLI: job harian sekali
   per tanggal, job master sekali dengan snapshot tanggal awal. Default opsi sama dengan
   `run_exporter.bat`: upload S3 ya, simpan lokal tidak.

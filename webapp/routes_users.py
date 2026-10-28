@@ -1,4 +1,7 @@
-"""Kelola user Web UI (khusus admin). Login tetap lewat SSO -- di sini hanya siapa boleh masuk & role-nya."""
+"""
+Kelola user Web UI (khusus admin). Login tetap lewat SSO -- di sini hanya siapa boleh masuk, role-nya, dan
+persetujuan Ekspor Cepat untuk Viewer (can_export; akun daftar otomatis lewat SSO mulai dari 0).
+"""
 
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ class UserIn(BaseModel):
 class UserPatch(BaseModel):
     role: Role | None = None
     active: bool | None = None
+    can_export: bool | None = None
 
 
 def _normalize(username: str) -> str:
@@ -38,16 +42,17 @@ def _normalize(username: str) -> str:
 
 @router.get("")
 def list_users(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
-    rows = db.execute("SELECT username, full_name, email, role, active, created_at, created_by, last_login_at "
-                      "FROM users ORDER BY active DESC, username").fetchall()
-    return {"users": [dict(r, active=bool(r["active"])) for r in rows]}
+    rows = db.execute("SELECT username, full_name, email, role, active, can_export, created_at, created_by, "
+                      "last_login_at FROM users ORDER BY active DESC, username").fetchall()
+    return {"users": [dict(r, active=bool(r["active"]), can_export=bool(r["can_export"])) for r in rows]}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def add_user(body: UserIn, admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
     username = _normalize(body.username)
     try:
-        db.execute("INSERT INTO users (username, role, active, created_at, created_by) VALUES (?, ?, 1, ?, ?)",
+        db.execute("INSERT INTO users (username, role, active, can_export, created_at, created_by) "
+                   "VALUES (?, ?, 1, 1, ?, ?)",
                    (username, body.role, utc_now(), admin["username"]))
     except sqlite3.IntegrityError:
         raise HTTPException(status.HTTP_409_CONFLICT, f"User '{username}' sudah terdaftar.")
@@ -57,7 +62,7 @@ def add_user(body: UserIn, admin: dict = Depends(require_role("admin")), db: sql
 @router.patch("/{username}")
 def update_user(username: str, body: UserPatch, _admin: dict = Depends(require_role("admin")),
                 db: sqlite3.Connection = Depends(get_db)):
-    user = db.execute("SELECT role, active FROM users WHERE username = ?", (username,)).fetchone()
+    user = db.execute("SELECT role, active, can_export FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"User '{username}' tidak ditemukan.")
     role = body.role or user["role"]
@@ -68,7 +73,9 @@ def update_user(username: str, body: UserPatch, _admin: dict = Depends(require_r
                             (username,)).fetchone()[0]
         if others == 0:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Minimal harus ada satu admin aktif.")
-    db.execute("UPDATE users SET role = ?, active = ? WHERE username = ?", (role, active, username))
+    can_export = user["can_export"] if body.can_export is None else int(body.can_export)
+    db.execute("UPDATE users SET role = ?, active = ?, can_export = ? WHERE username = ?",
+               (role, active, can_export, username))
     if not active:
         db.execute("DELETE FROM sessions WHERE username = ?", (username,))
-    return {"username": username, "role": role, "active": bool(active)}
+    return {"username": username, "role": role, "active": bool(active), "can_export": bool(can_export)}
