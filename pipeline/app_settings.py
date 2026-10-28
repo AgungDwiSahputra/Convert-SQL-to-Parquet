@@ -27,6 +27,10 @@ DEFAULTS = {
     "freshness.check_time": "06:00",  # jam (WIB) pemeriksaan + email job terlambat
     "freshness.last_date": None,    # tanggal (WIB) penjaga terakhir berjalan
     "freshness.last_result": None,  # ringkasan pemeriksaan terakhir
+    "s3inv.enabled": True,          # inventaris S3 harian (pipeline/s3_inventory.py) -- hanya membaca S3
+    "s3inv.scan_time": "05:30",     # jam (WIB) pindai harian -- sebelum penjaga kesegaran
+    "s3inv.last_date": None,        # tanggal (WIB) pindai harian terakhir
+    "s3inv.last_result": None,      # ringkasan pindai terakhir (harian / manual)
     "maintenance.last_date": None,  # tanggal (WIB) pemeliharaan harian terakhir
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bell, HardDrive, Mail, Send, ShieldCheck } from 'lucide-react'
+import { Bell, HardDrive, Mail, RefreshCw, Send, ShieldCheck } from 'lucide-react'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
@@ -24,6 +24,8 @@ export default function SettingsPage() {
   const [dqForm, setDqForm] = useState(null)
   const [dqSaving, setDqSaving] = useState(false)
   const [dqMessage, setDqMessage] = useState(null)
+  const [scanning, setScanning] = useState(false)
+  const [scanResult, setScanResult] = useState(null)
 
   useEffect(() => {
     if (data && !form) {
@@ -41,7 +43,7 @@ export default function SettingsPage() {
     setDqSaving(true)
     setDqMessage(null)
     try {
-      const { freshness_last: _last, ...body } = dqForm
+      const { freshness_last: _last, s3inv_last: _inv, ...body } = dqForm
       await api('/settings/dq', { method: 'PUT', body })
       setDqMessage({ tone: 'info', text: 'Pengaturan data quality tersimpan.' })
     } catch (e) {
@@ -50,6 +52,18 @@ export default function SettingsPage() {
       setDqSaving(false)
     }
   }
+
+  const scanS3 = async () => {
+    setScanning(true)
+    try {
+      setScanResult(await api('/settings/s3-inventory/scan', { method: 'POST' }))
+    } catch (e) {
+      setScanResult({ error: e.message, errors: [] })
+    } finally {
+      setScanning(false)
+    }
+  }
+  const inv = scanResult || data.dq.s3inv_last
 
   const save = async () => {
     setSaving(true)
@@ -137,9 +151,9 @@ export default function SettingsPage() {
               <Field label="Peringatan volume" hint="Jumlah baris dibanding median riwayat sesuai irama job. Hanya peringatan — tidak menahan upload.">
                 <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
                   <span>di bawah</span>
-                  <input aria-label="Batas bawah persen" type="number" min={1} max={99} className={`${inputClass} w-20`} value={dqForm.volume_low_pct} onChange={(e) => setDq('volume_low_pct', Number(e.target.value))} />
+                  <input aria-label="Batas bawah persen" type="number" min={1} max={99} className={`${inputClass} max-w-20`} value={dqForm.volume_low_pct} onChange={(e) => setDq('volume_low_pct', Number(e.target.value))} />
                   <span>% atau di atas</span>
-                  <input aria-label="Batas atas persen" type="number" min={101} max={1000} className={`${inputClass} w-24`} value={dqForm.volume_high_pct} onChange={(e) => setDq('volume_high_pct', Number(e.target.value))} />
+                  <input aria-label="Batas atas persen" type="number" min={101} max={1000} className={`${inputClass} max-w-24`} value={dqForm.volume_high_pct} onChange={(e) => setDq('volume_high_pct', Number(e.target.value))} />
                   <span>% median</span>
                 </div>
               </Field>
@@ -149,16 +163,44 @@ export default function SettingsPage() {
                   <span className="text-sm text-gray-500">tanggal</span>
                 </div>
               </Field>
-              <Field label="Jangkauan cek celah" hint="Periode di tengah riwayat yang belum ter-load dilaporkan sejauh ini ke belakang (dimulai dari tanggal pertama yang tercatat per job). Master tidak dicek.">
+              <Field label="Jangkauan cek celah" hint="Periode di tengah riwayat yang belum ter-load dilaporkan sejauh ini ke belakang, dimulai dari tanggal tertua yang tercatat pipeline atau ada di S3. Master tidak dicek.">
                 <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                  <input aria-label="Hari (job harian)" type="number" min={7} max={366} className={`${inputClass} w-20`} value={dqForm.gap_days} onChange={(e) => setDq('gap_days', Number(e.target.value))} />
+                  <input aria-label="Hari (job harian)" type="number" min={7} max={366} className={`${inputClass} max-w-20`} value={dqForm.gap_days} onChange={(e) => setDq('gap_days', Number(e.target.value))} />
                   <span>hari ·</span>
-                  <input aria-label="Minggu (job mingguan)" type="number" min={4} max={104} className={`${inputClass} w-20`} value={dqForm.gap_weeks} onChange={(e) => setDq('gap_weeks', Number(e.target.value))} />
+                  <input aria-label="Minggu (job mingguan)" type="number" min={4} max={104} className={`${inputClass} max-w-20`} value={dqForm.gap_weeks} onChange={(e) => setDq('gap_weeks', Number(e.target.value))} />
                   <span>minggu ·</span>
-                  <input aria-label="Bulan (job bulanan)" type="number" min={2} max={36} className={`${inputClass} w-20`} value={dqForm.gap_months} onChange={(e) => setDq('gap_months', Number(e.target.value))} />
+                  <input aria-label="Bulan (job bulanan)" type="number" min={2} max={36} className={`${inputClass} max-w-20`} value={dqForm.gap_months} onChange={(e) => setDq('gap_months', Number(e.target.value))} />
                   <span>bulan</span>
                 </div>
               </Field>
+              <div className="space-y-3 rounded-xl border border-gray-200/80 p-4">
+                <Toggle
+                  id="inv-enabled"
+                  label="Inventaris S3 harian"
+                  description="Sekali sehari membaca daftar partisi di S3 (hanya baca) supaya kesegaran & celah juga mengenali data yang diunggah di luar catatan pipeline — mis. sebelum fitur data quality ada. Hari 0 baris tidak membuat file di S3, jadi celah bisa juga berarti memang kosong."
+                  checked={dqForm.s3inv_enabled}
+                  onChange={(v) => setDq('s3inv_enabled', v)}
+                />
+                {dqForm.s3inv_enabled && (
+                  <Field label="Jam pindai (WIB)" htmlFor="inv-time" hint="Sebelum jam penjaga kesegaran.">
+                    <input id="inv-time" type="time" className={`${inputClass} max-w-32`} value={dqForm.s3inv_scan_time} onChange={(e) => setDq('s3inv_scan_time', e.target.value)} />
+                  </Field>
+                )}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs text-gray-500">
+                    {inv?.at
+                      ? `Pindai terakhir ${fmtDateTime(inv.at)} (${inv.by}): ${inv.jobs} dari ${inv.targets} job, ${inv.dates} tanggal tercatat.`
+                      : 'Belum pernah dipindai.'}
+                  </p>
+                  <Button variant="secondary" size="sm" icon={RefreshCw} loading={scanning} onClick={scanS3}>Pindai sekarang</Button>
+                </div>
+                {inv?.error && <Alert tone="error">{inv.error}</Alert>}
+                {inv?.errors?.length > 0 && (
+                  <Alert tone="warning" title={`${inv.errors.length} job gagal dipindai`}>
+                    {inv.errors.slice(0, 5).map((e) => `${e.job_name}: ${e.error}`).join(' · ')}
+                  </Alert>
+                )}
+              </div>
               <Toggle
                 id="fr-enabled"
                 label="Penjaga kesegaran harian"
@@ -168,7 +210,7 @@ export default function SettingsPage() {
               />
               {dqForm.freshness_enabled && (
                 <Field label="Jam pemeriksaan (WIB)" htmlFor="fr-time" hint="Beri jeda setelah jadwal ekspor harian selesai.">
-                  <input id="fr-time" type="time" className={`${inputClass} w-32`} value={dqForm.freshness_check_time} onChange={(e) => setDq('freshness_check_time', e.target.value)} />
+                  <input id="fr-time" type="time" className={`${inputClass} max-w-32`} value={dqForm.freshness_check_time} onChange={(e) => setDq('freshness_check_time', e.target.value)} />
                 </Field>
               )}
               {data.dq.freshness_last && (

@@ -170,7 +170,7 @@ function ScheduleForm({ initial, onClose, onSaved }) {
             </select>
             {form.window_mode === 'last_days' && (
               <div className="flex items-center gap-2">
-                <input aria-label="Jumlah hari" type="number" min={2} max={31} className={`${inputClass} w-20`} value={form.window_days} onChange={(e) => set({ window_days: Math.min(31, Math.max(2, Number(e.target.value) || 2)) })} />
+                <input aria-label="Jumlah hari" type="number" min={2} max={31} className={`${inputClass} max-w-20`} value={form.window_days} onChange={(e) => set({ window_days: Math.min(31, Math.max(2, Number(e.target.value) || 2)) })} />
                 <span className="text-sm text-gray-500">hari s/d</span>
               </div>
             )}

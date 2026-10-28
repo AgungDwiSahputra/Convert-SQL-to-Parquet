@@ -179,7 +179,7 @@ export default function JobDetailPage() {
                       {job.freshness.gaps.count > job.freshness.gaps.items.length && (
                         <p className="text-xs text-gray-500">+{job.freshness.gaps.count - job.freshness.gaps.items.length} periode lain</p>
                       )}
-                      <p className="text-xs text-gray-500">Jalankan ulang rentang di atas dari halaman Jalankan.</p>
+                      <p className="text-xs text-gray-500">Tidak ada di S3 dan belum tercatat diproses — bisa juga memang 0 baris (hari kosong tidak membuat file). Jalankan ulang rentang di atas dari halaman Jalankan untuk memastikan.</p>
                     </div>
                   )}
                 </Row>

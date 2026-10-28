@@ -441,6 +441,12 @@ def s3_folder(template: str, args: dict) -> str | None:
     return _key(info["layer"], info["module"], dataset)
 
 
+def s3_list_prefix(template: str, args: dict) -> str | None:
+    """Prefix untuk me-list semua partisi dataset job di bucket (S3_PREFIX + folder + '/'), mis. inventaris S3."""
+    folder = s3_folder(template, args)
+    return _key(S3_PREFIX, folder) + "/" if folder else None
+
+
 def build_job(name: str, template: str, args: dict, target_date: str) -> Job:
     """Satu baris database job -> objek Job untuk satu tanggal proses."""
     if template not in TEMPLATES:

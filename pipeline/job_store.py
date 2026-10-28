@@ -290,6 +290,18 @@ CREATE TABLE master_snapshots (
 );
 CREATE INDEX ix_master_snapshots_job ON master_snapshots (job_name, snapshot_date);
 """,
+    # v10 -- inventaris S3 (pipeline/s3_inventory.py): tanggal data yang benar-benar ada di S3 per job
+    """
+CREATE TABLE s3_inventory (
+    job_name      TEXT    NOT NULL,
+    target_date   TEXT    NOT NULL,     -- tanggal data; partisi mingguan = 7 baris (Senin-Minggu)
+    s3_key        TEXT    NOT NULL,     -- file terbaru di partisi itu
+    size_bytes    INTEGER,
+    last_modified TEXT,
+    scanned_at    TEXT    NOT NULL,
+    PRIMARY KEY (job_name, target_date)
+);
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

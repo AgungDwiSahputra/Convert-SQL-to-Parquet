@@ -318,7 +318,7 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   grafik dari `GET /api/dashboard` (`dq_results`, hasil terbaru per job+tanggal — run ulang yang sukses
   menutup masalah lama); kesegaran & celah dari `/api/jobs`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
-  `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`. Dinaikkan otomatis saat web, worker, atau
+  `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`, `master_snapshots`, `s3_inventory`. Dinaikkan otomatis saat web, worker, atau
   CLI start.
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
@@ -379,7 +379,8 @@ Susunan yang disarankan (proses sumber WM untuk H-1 berjalan mulai 00:01, selesa
 
 **Kesegaran data** (`pipeline/freshness.py`): per job, tanggal terbaru yang **sudah diproses** — ada
 hasil di `dq_results` yang tidak ditahan DQ dan sudah dipublikasikan atau memang 0 baris (run uji
-`--skip-s3` berisi data tidak dihitung). Dibandingkan dengan tanggal yang diharapkan: harian/snapshot
+`--skip-s3` berisi data tidak dihitung), **atau** partisinya ada di S3 menurut inventaris S3 (di bawah).
+Dibandingkan dengan tanggal yang diharapkan: harian/snapshot
 H-1, mingguan Minggu lalu, bulanan akhir bulan lalu (mulai tanggal 3). Tampil sebagai badge
 **Segar / Terlambat / Belum ada data** di Daftar Job (ada filter "Aktif · terlambat"), detail job, dan
 Beranda.
@@ -396,9 +397,18 @@ dijalankan `--skip-s3` dihitung celah. Snapshot (master) tidak dicek.
 
 Minggu mengikuti konvensi tabel minggu PZO (`T_PZO_Week_Temp`, cocok 100% untuk 2020–2028): minggu lintas
 bulan ikut bulan hari **Kamis**-nya. Jangkauan default 90 hari / 26 minggu / 12 bulan (Pengaturan → Data
-quality), dimulai dari tanggal pertama yang tercatat per job — riwayat sebelum `dq_results` ada tidak
-diketahui. Tampil sebagai badge **Ada celah** (Daftar Job + filter "Aktif · ada celah", detail job beserta
+quality), dimulai dari tanggal tertua yang diketahui per job (`dq_results` atau S3). Hari 0 baris tidak
+membuat file di S3, jadi celah = belum ter-load **atau** memang kosong — run ulang tanggal itu menutupnya
+(hasil 0 baris tercatat). Tampil sebagai badge **Ada celah** (Daftar Job + filter "Aktif · ada celah", detail job beserta
 daftar periodenya, Beranda) dan di email penjaga.
+
+**Inventaris S3** (`pipeline/s3_inventory.py`, tabel `s3_inventory`): `dq_results` hanya berisi run yang
+dicatat pipeline ini, jadi upload sebelum fitur DQ ada atau dari CLI dengan `jobs.db` lain tidak terlihat.
+Sekali sehari (default **aktif**, jam 05:30 WIB) worker me-list folder S3 tiap job aktif berirama
+harian/mingguan/bulanan (layout harian/mingguan; master tidak) dan mencatat tanggal partisinya — partisi
+mingguan `recorded_week=W{n}` dicatat sebagai 7 hari minggu itu (konvensi PZO). Hanya membaca S3 (butuh izin
+`s3:ListBucket`), ±1 request per job; isi per job diganti penuh tiap pindai, gagal pindai tidak menghapus isi
+lama. Manual: tombol **Pindai sekarang** di Pengaturan → Data quality, atau `python manage.py scan-s3`.
 
 **Penjaga harian** (halaman Pengaturan → Data quality, default **nonaktif**): sekali sehari setelah jam cek
 (default 06:00) mengirim email daftar job yang belum segar **dan yang punya celah** ke penerima tetap. Aktifkan
@@ -486,7 +496,8 @@ ada di komentar `Dockerfile.windows`.
    `localhost` server itu sendiri): `http://<server>:8084/api/health` harus `worker_online: true` —
    bukti kedua container berbagi `jobs.db`. Lalu jalankan satu run uji dengan toggle **Upload ke S3**
    dimatikan. Buka port 8084 di firewall/Security Group bila perlu. Pastikan akun AWS di `.env` punya izin
-   `s3:DeleteObject` untuk prefix master (snapshot master berbasis perubahan, §5).
+   `s3:DeleteObject` untuk prefix master (snapshot master berbasis perubahan, §5) dan `s3:ListBucket`
+   (inventaris S3, §10).
 7. Matikan instance lama dan task `run_exporter.bat` yang tumpang tindih (§10).
 
 **Update versi**: `git pull` → `docker build` (dengan `HOSTS_ENTRIES` yang sama) →

@@ -1,6 +1,6 @@
 """
 Pengaturan aplikasi (khusus admin): penerima & saklar notifikasi email, email uji, riwayat
-notifikasi, status pemeliharaan. Akun SMTP TIDAK bisa dilihat/diubah di sini -- hanya di .env server.
+notifikasi, status pemeliharaan, data quality & inventaris S3. Akun SMTP TIDAK bisa dilihat/diubah di sini -- hanya di .env server.
 """
 
 from __future__ import annotations
@@ -11,9 +11,10 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from pipeline import maintenance, notify
+from pipeline import maintenance, notify, s3_inventory
 from pipeline.app_settings import get_settings, set_settings
 from pipeline.config import APP_BASE_URL, BACKUP_KEEP, LOG_RETENTION_DAYS, SMTP_SECURITY
+from pipeline.export import make_s3_client
 from webapp.deps import get_db, require_role
 
 router = APIRouter()
@@ -37,6 +38,8 @@ class DqIn(BaseModel):
     gap_months: int = Field(12, ge=2, le=36)
     freshness_enabled: bool = False
     freshness_check_time: str = Field("06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    s3inv_enabled: bool = True
+    s3inv_scan_time: str = Field("05:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class TestEmailIn(BaseModel):
@@ -46,7 +49,7 @@ class TestEmailIn(BaseModel):
 @router.get("")
 def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
     s = get_settings(db, "notify.")
-    d = get_settings(db, "dq.") | get_settings(db, "freshness.")
+    d = get_settings(db, "dq.") | get_settings(db, "freshness.") | get_settings(db, "s3inv.")
     rows = db.execute("SELECT * FROM notifications ORDER BY id DESC LIMIT 30").fetchall()
     return {
         "notify": {"recipients": s["notify.recipients"], "on_failed": s["notify.on_failed"],
@@ -57,7 +60,9 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
                "volume_min_history": d["dq.volume_min_history"], "gap_days": d["dq.gap_days"],
                "gap_weeks": d["dq.gap_weeks"], "gap_months": d["dq.gap_months"],
                "freshness_enabled": d["freshness.enabled"],
-               "freshness_check_time": d["freshness.check_time"], "freshness_last": d["freshness.last_result"]},
+               "freshness_check_time": d["freshness.check_time"], "freshness_last": d["freshness.last_result"],
+               "s3inv_enabled": d["s3inv.enabled"], "s3inv_scan_time": d["s3inv.scan_time"],
+               "s3inv_last": d["s3inv.last_result"]},
         # Hanya status -- alamat server/akun SMTP sengaja tidak ditampilkan.
         "smtp": {"configured": notify.smtp_configured(), "security": SMTP_SECURITY,
                  "from_matches_login": notify.from_matches_login()},
@@ -88,8 +93,15 @@ def save_dq(body: DqIn, admin: dict = Depends(require_role("admin")), db: sqlite
                       "dq.volume_min_history": body.volume_min_history, "dq.gap_days": body.gap_days,
                       "dq.gap_weeks": body.gap_weeks, "dq.gap_months": body.gap_months,
                       "freshness.enabled": body.freshness_enabled,
-                      "freshness.check_time": body.freshness_check_time}, admin["username"])
+                      "freshness.check_time": body.freshness_check_time, "s3inv.enabled": body.s3inv_enabled,
+                      "s3inv.scan_time": body.s3inv_scan_time}, admin["username"])
     return {"ok": True}
+
+
+@router.post("/s3-inventory/scan")
+def scan_s3_inventory(admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
+    """Pindai inventaris S3 sekarang (hanya membaca S3; beberapa detik untuk puluhan job)."""
+    return s3_inventory.scan(db, make_s3_client(False), by=admin["username"])
 
 
 @router.post("/test-email")

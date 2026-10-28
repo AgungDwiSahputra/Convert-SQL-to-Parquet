@@ -2,8 +2,9 @@
 KESEGARAN DATA -- apakah tiap job aktif sudah memproses tanggal terbaru yang wajar untuk iramanya.
 
 Tanggal dianggap SUDAH DIPROSES kalau di dq_results ada hasil yang tidak ditahan DQ dan (sudah
-dipublikasikan ATAU memang 0 baris -- tidak ada yang perlu diupload). Run uji --skip-s3 yang berisi
-data tidak dihitung. Run CLI ikut terhitung selama memakai jobs.db yang sama.
+dipublikasikan ATAU memang 0 baris -- tidak ada yang perlu diupload), ATAU partisinya ada di S3 menurut
+inventaris S3 (tabel s3_inventory, pipeline/s3_inventory.py -- menangkap upload di luar catatan pipeline:
+sebelum fitur DQ ada, CLI dengan jobs.db lain). Run uji --skip-s3 yang berisi data tidak dihitung.
 
 Tanggal yang diharapkan (hari ini WIB = T):
   harian / snapshot : T-1 (proses hari ini mengolah H-1)
@@ -12,8 +13,9 @@ Tanggal yang diharapkan (hari ini WIB = T):
 
 CELAH (find_gaps): tanggal / minggu / bulan di TENGAH riwayat yang belum diproses, walaupun data terbaru
 sudah ada (ujung yang belum diproses = status 'late', tidak dilaporkan dua kali). Hanya irama harian,
-mingguan, bulanan -- snapshot (master) tidak dicek. Dimulai dari tanggal pertama yang tercatat per job
-(riwayat sebelum dq_results ada tidak diketahui) dan dibatasi jangkauan dq.gap_days / gap_weeks / gap_months.
+mingguan, bulanan -- snapshot (master) tidak dicek. Dimulai dari tanggal tertua yang diketahui per job
+(dq_results atau S3) dan dibatasi jangkauan dq.gap_days / gap_weeks / gap_months. Hari 0 baris tidak membuat
+file di S3, jadi celah = belum ter-load ATAU memang kosong; run ulang tanggal itu menutupnya.
 Minggu = konvensi tabel minggu PZO (lihat pzo_week).
 
 Penjaga harian (run_daily, dipanggil thread scheduler di worker): sekali per hari setelah jam cek
@@ -50,6 +52,15 @@ def pzo_week(d: date) -> tuple[int, int, int, date, date]:
     first = thursday.replace(day=1)
     first_thursday = first + timedelta(days=(3 - first.weekday()) % 7)
     return thursday.year, thursday.month, (thursday - first_thursday).days // 7 + 1, monday, monday + timedelta(days=6)
+
+
+def pzo_week_start(year: int, month: int, n: int) -> date:
+    """Kebalikan pzo_week: Senin minggu ke-N bulan itu. ValueError kalau bulan itu tidak punya minggu ke-N."""
+    first = date(year, month, 1)
+    monday = first + timedelta(days=(3 - first.weekday()) % 7 + 7 * (n - 1) - 3)
+    if n < 1 or pzo_week(monday)[:3] != (year, month, n):
+        raise ValueError(f"minggu ke-{n} {year}-{month:02d} tidak ada")
+    return monday
 
 
 def _fmt_range(a: date, b: date) -> str:
@@ -141,12 +152,13 @@ def job_freshness(conn: sqlite3.Connection, rows: list[JobRow], today: date | No
     """job -> {status: fresh|late|unknown, cadence, latest, expected, lag_days, gaps}."""
     today = today or datetime.now(WIB).date()
     lookback = lookback or gap_lookback(conn)
+    known = (f"SELECT job_name, target_date FROM dq_results WHERE {_PROCESSED} "
+             "UNION SELECT job_name, target_date FROM s3_inventory")
     span = {n: (first, last) for n, first, last in conn.execute(
-        f"SELECT job_name, MIN(target_date), MAX(target_date) FROM dq_results WHERE {_PROCESSED} GROUP BY job_name")}
+        f"SELECT job_name, MIN(target_date), MAX(target_date) FROM ({known}) GROUP BY job_name")}
     since = today - timedelta(days=max(lookback["days"], lookback["weeks"] * 7, lookback["months"] * 31) + 31)
     done: dict[str, set[date]] = {}
-    for n, d in conn.execute(f"SELECT job_name, target_date FROM dq_results WHERE {_PROCESSED} AND target_date >= ?",
-                             (since.isoformat(),)):
+    for n, d in conn.execute(f"SELECT job_name, target_date FROM ({known}) WHERE target_date >= ?", (since.isoformat(),)):
         done.setdefault(n, set()).add(date.fromisoformat(d))
     out = {}
     for r in rows:

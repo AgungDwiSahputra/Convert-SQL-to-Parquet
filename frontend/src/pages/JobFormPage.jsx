@@ -634,11 +634,11 @@ export default function JobFormPage() {
             <div className="flex flex-wrap items-end gap-3">
               {needsDate && (
                 <Field label="Tanggal data" htmlFor="test_date">
-                  <input id="test_date" type="date" className={`${inputClass} w-44`} value={testDate} onChange={(e) => setTestDate(e.target.value)} />
+                  <input id="test_date" type="date" className={`${inputClass} max-w-44`} value={testDate} onChange={(e) => setTestDate(e.target.value)} />
                 </Field>
               )}
               <Field label="Batas baris" htmlFor="test_limit">
-                <select id="test_limit" className={`${selectClass} w-28`} value={testLimit} onChange={(e) => setTestLimit(Number(e.target.value))}>
+                <select id="test_limit" className={`${selectClass} max-w-28`} value={testLimit} onChange={(e) => setTestLimit(Number(e.target.value))}>
                   {[20, 100, 500].map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </Field>

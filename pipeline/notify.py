@@ -300,8 +300,9 @@ def notify_stale(conn: sqlite3.Connection, result: dict) -> None:
     subject = (f"{SUBJECT_PREFIX} Kesegaran {result['date']}: {len(late)} job belum segar, "
                f"{len(gaps)} job ada celah")
     intro = (f"Pemeriksaan {result['date']} atas {result['checked']} job aktif. Belum segar = belum memproses tanggal "
-             f"terbaru yang diharapkan; celah = tanggal/minggu/bulan di tengah riwayat yang belum ter-load (jalankan "
-             f"ulang rentang itu dari halaman Jalankan). Cek juga jadwal, worker, dan kelengkapan sumber data.")
+             f"terbaru yang diharapkan; celah = tanggal/minggu/bulan di tengah riwayat yang tidak ada di S3 maupun catatan "
+             f"pipeline (bisa juga memang 0 baris -- jalankan ulang rentang itu dari halaman Jalankan untuk memastikan). "
+             f"Cek juga jadwal, worker, dan kelengkapan sumber data.")
     rows = [(f["job_name"], f["cadence"], "belum ada data" if f["status"] == "unknown" else "terlambat",
              f"terbaru {f['latest'] or '-'}, seharusnya {f['expected']}") for f in late[:50]]
     rows += [(g["job_name"], g["cadence"], f"celah ({g['count']})", "; ".join(g["items"][:6])) for g in gaps[:50]]
