@@ -119,7 +119,7 @@ export default function SettingsPage() {
             <CardHeader
               icon={Bell}
               title="Notifikasi email"
-              description="Dikirim worker setelah run selesai"
+              description={`Dikirim worker setelah run selesai · nama pengirim "${data.smtp.from_name}" (SMTP_FROM_NAME di .env)`}
               action={data.smtp.configured
                 ? <Badge tone="mint">SMTP siap · {SECURITY_LABEL[data.smtp.security] || data.smtp.security}</Badge>
                 : <Badge tone="amber">SMTP belum diatur</Badge>}

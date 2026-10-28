@@ -69,7 +69,7 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
                "s3inv_last": d["s3inv.last_result"]},
         # Hanya status -- alamat server/akun SMTP sengaja tidak ditampilkan.
         "smtp": {"configured": notify.smtp_configured(), "security": SMTP_SECURITY,
-                 "from_matches_login": notify.from_matches_login()},
+                 "from_matches_login": notify.from_matches_login(), "from_name": notify.from_name()},
         "auth": {"auto_viewer": get_settings(db, "auth.")["auth.auto_viewer"],
                  "pending_export": db.execute("SELECT COUNT(*) FROM users WHERE role = 'viewer' AND active = 1 "
                                               "AND can_export = 0").fetchone()[0]},

@@ -434,6 +434,10 @@ terlihat di sini.
 - **Data belum segar** — hasil penjaga kesegaran harian (kalau diaktifkan), ke penerima tetap.
 - Penerima = daftar tetap + pembuat run. Akun SMTP hanya di `.env` (`SMTP_*`); isi `APP_BASE_URL`
   supaya email berisi link.
+- Nama pengirim = `SMTP_FROM_NAME` (default "Monitoring Parquet Exporter"; alamatnya tetap `SMTP_FROM`).
+  Prefix subjek `[Parquet Exporter]` sengaja tetap (aturan filter kotak masuk penerima). Email HTML responsif
+  (`_html()`: kerangka tabel + inline style, rincian sebagai kartu bertumpuk, maks `MAX_EMAIL_ROWS` kartu) +
+  versi teks polos; header `Auto-Submitted` mencegah balasan otomatis "Out of Office".
 - Gagal kirim tidak memengaruhi run. Semua percobaan tercatat di tabel `notifications`; tombol
   "Kirim email uji" untuk memeriksa setelan SMTP.
 
