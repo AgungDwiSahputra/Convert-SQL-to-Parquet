@@ -15,6 +15,7 @@ PowerShell:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -63,6 +64,12 @@ SESSION_HOURS = float(os.environ.get("SESSION_HOURS", "8"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes")
 # Alamat Web UI seperti dibuka user (dipakai untuk link di email notifikasi), mis. https://<server>/
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+# Sub-path Web UI di belakang reverse proxy/gateway, mis. /apps/monitoring-datas (proxy meneruskan path
+# UTUH, tanpa membuang prefix). Kosong = Web UI di root "/". Hanya huruf/angka/-/_ per segmen.
+BASE_PATH = os.environ.get("BASE_PATH", "").strip().strip("/")
+BASE_PATH = f"/{BASE_PATH}" if BASE_PATH else ""
+if BASE_PATH and not re.fullmatch(r"(/[A-Za-z0-9_-]+)+", BASE_PATH):
+    raise ValueError(f"BASE_PATH tidak valid: {BASE_PATH!r} (contoh benar: /apps/monitoring-datas)")
 
 # --- Email notifikasi (SMTP) ---
 # SEMUA nilai hanya dari environment/.env server -- tidak ada default yang berisi alamat/akun nyata.

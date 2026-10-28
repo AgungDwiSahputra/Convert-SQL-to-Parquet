@@ -24,7 +24,7 @@ import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from pipeline.config import COOKIE_SECURE, SESSION_HOURS, SSO_BASE_URL
+from pipeline.config import BASE_PATH, COOKIE_SECURE, SESSION_HOURS, SSO_BASE_URL
 from pipeline.app_settings import get_settings
 from pipeline.job_store import utc_now
 from webapp.deps import SESSION_COOKIE, current_user, get_db, hash_token
@@ -39,6 +39,8 @@ _sso = httpx.Client(timeout=15)
 _MAX_FAILED, _FAILED_WINDOW_S = 5, 600
 _failed: dict[str, list[float]] = {}
 AUTO_CREATOR = "sso-auto"   # users.created_by untuk akun yang daftar otomatis saat login pertama
+# Cookie hanya dikirim ke Web UI ini -- aplikasi lain di domain yang sama (sub-path lain) tidak menerimanya.
+COOKIE_PATH = f"{BASE_PATH}/"
 
 
 def _too_many_failures(key: str) -> bool:
@@ -121,7 +123,7 @@ def login(body: LoginIn, request: Request, response: Response, db: sqlite3.Conne
     db.execute("UPDATE users SET full_name = ?, email = ?, last_login_at = ? WHERE username = ?",
                (full_name, email, utc_now(), username))
     response.set_cookie(SESSION_COOKIE, token, max_age=int(SESSION_HOURS * 3600), httponly=True,
-                        samesite="lax", secure=COOKIE_SECURE, path="/")
+                        samesite="lax", secure=COOKIE_SECURE, path=COOKIE_PATH)
     return {"username": username, "full_name": full_name, "email": email, "role": user["role"],
             "can_export": bool(user["can_export"])}
 
@@ -131,7 +133,7 @@ def logout(response: Response, pqx_session: str | None = Cookie(default=None),
            db: sqlite3.Connection = Depends(get_db)):
     if pqx_session:
         db.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(pqx_session),))
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE, path=COOKIE_PATH)
     return {"ok": True}
 
 

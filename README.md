@@ -329,6 +329,13 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
   `frontend/src/index.css` (palet hijau, mode terang). Dokumentasi API: `/api/docs`.
+- **Sub-path (`BASE_PATH`)**: kosong = Web UI di root `/`. Diisi (mis. `/apps/monitoring-datas`) saat
+  berjalan di belakang gateway (§11) — semua route (`{BASE_PATH}/api/...`, asset, halaman) pindah ke
+  bawah prefix itu, `/` diarahkan ke `{BASE_PATH}/`, dan cookie session hanya berlaku di path itu.
+  Frontend di-build dengan `base: './'`; server menyuntikkan `<base href="{BASE_PATH}/">` ke `index.html`,
+  dan `frontend/src/lib/api.js` (`BASE_PATH`) membacanya untuk prefix API & `basename` React Router —
+  jadi satu hasil build jalan di root maupun sub-path mana pun. URL di frontend jangan ditulis absolut
+  (`/api/...`, `/favicon.svg`): lewat `api()`/`apiDownload()` atau `<Link>` React Router.
 
 ## 9. Kelola job lewat Web UI
 
@@ -465,7 +472,7 @@ sama** ke `C:\data`:
 
 | Container | Perintah | Port |
 |---|---|---|
-| `parquet-exporter-web` | default (uvicorn) | `8084:8000` — 8000/8082/8083 sudah dipakai aplikasi lain |
+| `parquet-exporter-web` | default (uvicorn) | `8084:8000` — 8000/8082/8083 sudah dipakai aplikasi lain. Di belakang gateway (subbagian berikut) port ini tidak perlu dibuka ke publik |
 | `parquet-exporter-worker` | `python worker.py` — **satu instance saja** | — |
 
 Image berisi Python, Visual C++ Redistributable, ODBC Driver 17, dependensi terkunci, dan frontend hasil
@@ -538,6 +545,37 @@ docker logs --tail 100 parquet-exporter-worker
 Log, output lokal, dan backup harian ada di folder data host `D:\APLIKASI\monitoring-datas\Databases`
 (`logs\`, `output\`, `backups\`).
 
+### Di belakang gateway (satu port publik untuk semua aplikasi Docker)
+
+Supaya aplikasi Docker baru tidak butuh port publik + rule AWS baru, semua aplikasi di server ini
+diakses lewat **satu** container gateway (Caddy) yang meneruskan request berdasarkan path:
+
+```
+Publik ─► AWS (rule sekali: dev.app-div.com/apps/* → server:8085) ─► gateway :8085
+            ├─ /apps/monitoring-datas/* ─► parquet-exporter-web:8000   (path diteruskan UTUH)
+            └─ /apps/<aplikasi-lain>/*  ─► <container>:<port>
+```
+
+Gateway punya folder/repo sendiri (`D:\APLIKASI\gateway`, lihat README di sana) karena dipakai banyak
+aplikasi. Untuk aplikasi ini, tambahkan di `.env` lalu jalankan ulang container web:
+
+```
+BASE_PATH=/apps/monitoring-datas
+APP_BASE_URL=https://dev.app-div.com/apps/monitoring-datas
+COOKIE_SECURE=true
+FORWARDED_ALLOW_IPS=<subnet jaringan nat, dari: docker network inspect nat>
+```
+
+- `BASE_PATH` harus sama dengan path di `Caddyfile` gateway (§8 — gateway tidak membuang prefix).
+- `FORWARDED_ALLOW_IPS` dibaca uvicorn langsung dari environment (berlaku lewat `--env-file`), supaya IP
+  asli pengguna dari header `X-Forwarded-For` dipakai untuk batas percobaan login. Isi subnet, jangan
+  `*`, selama port 8084 masih dipublish — kalau `*`, siapa pun yang mengakses 8084 langsung bisa
+  memalsukan IP-nya.
+- Gateway menjangkau container lewat **nama** di jaringan `nat` bawaan (Windows Server 2016 hanya
+  mendukung satu jaringan NAT, jadi jangan membuat jaringan baru). Setelah gateway berjalan, `-p 8084:8000`
+  boleh dihapus dari `docker run` web.
+- Login SSO berjalan server-ke-server (tanpa redirect), jadi tidak ada URL callback SSO yang perlu didaftarkan.
+
 ### Tanpa Docker (Windows biasa)
 
 Butuh akses jaringan ke SQL Server, S3, dan portal SSO, plus ODBC Driver 17. Ikuti §3, lalu jalankan
@@ -561,6 +599,6 @@ schtasks /Create /TN "ParquetExporter\Worker" /TR "\"D:\APLIKASI\monitoring-data
 Halaman login mengirim **password SSO** ke aplikasi ini. Lewat HTTP biasa, password itu berjalan tanpa
 enkripsi di jaringan. Minimal batasi port web hanya untuk jaringan internal. Idealnya pasang reverse
 proxy HTTPS (IIS URL Rewrite + ARR, atau nginx) di depan uvicorn, set `COOKIE_SECURE=true` dan
-`APP_BASE_URL=https://…`. Tanpa Docker, jalankan web dengan `WEB_HOST=127.0.0.1` supaya hanya proxy
+`APP_BASE_URL=https://…`. Di Docker, HTTPS diurus AWS di depan gateway (subbagian di atas). Tanpa Docker, jalankan web dengan `WEB_HOST=127.0.0.1` supaya hanya proxy
 yang bisa mengaksesnya; uvicorn memakai header `X-Forwarded-*` dari 127.0.0.1, jadi IP klien untuk
 batas percobaan login tetap benar.

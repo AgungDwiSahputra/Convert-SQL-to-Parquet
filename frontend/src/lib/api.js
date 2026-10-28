@@ -1,5 +1,9 @@
 // Pembungkus fetch ke backend FastAPI (/api/...). Session = cookie HttpOnly, dikirim otomatis.
 
+// Sub-path Web UI di belakang gateway (mis. /apps/monitoring-datas), dari <base href> yang diisi server.
+// '' = Web UI di root. Dipakai juga sebagai basename React Router (main.jsx).
+export const BASE_PATH = new URL(document.baseURI).pathname.replace(/\/$/, '')
+
 export class ApiError extends Error {
   constructor(status, message, detail = null) {
     super(message)
@@ -22,7 +26,7 @@ function detailMessage(detail) {
 export async function api(path, { method = 'GET', body } = {}) {
   let res
   try {
-    res = await fetch(`/api${path}`, {
+    res = await fetch(`${BASE_PATH}/api${path}`, {
       method,
       credentials: 'same-origin',
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
@@ -50,7 +54,7 @@ export async function api(path, { method = 'GET', body } = {}) {
 export async function apiDownload(path, body) {
   let res
   try {
-    res = await fetch(`/api${path}`, {
+    res = await fetch(`${BASE_PATH}/api${path}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
