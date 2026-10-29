@@ -76,7 +76,8 @@ def plan_items(rows: list[JobRow], start: date, end: date) -> list[PlannedItem]:
     """
     Rincian eksekusi run -- semantik mode range SAMA dengan exporter.py: job harian sekali per
     tanggal (file lokal diberi sufiks tanggal), job master (needs_date=False) SEKALI saja untuk
-    seluruh range dengan snapshot_date = tanggal awal.
+    seluruh range dengan snapshot_date = tanggal awal, job periodik (bronze mingguan/bulanan, Job.period)
+    sekali per periode yang tersentuh range dengan label = awal periode (satu run menarik seluruh periode).
     Beda kecil dengan CLI: di CLI job master yang GAGAL dicoba lagi di tanggal berikutnya;
     di sini tidak -- pakai "Ulangi yang belum berhasil" (retry_plan).
     """
@@ -84,13 +85,20 @@ def plan_items(rows: list[JobRow], start: date, end: date) -> list[PlannedItem]:
     is_range = len(dates) > 1
     by_name = {r.name: r for r in rows}
     done_master: set[str] = set()
+    done_periods: set[tuple[str, str]] = set()
     items = []
     for d in dates:
         for job in build_jobs(d.isoformat(), rows):
+            label = d
             if not job.needs_date:
                 if job.name in done_master:
                     continue
                 done_master.add(job.name)
+            elif job.period:
+                if (job.name, job.period[0]) in done_periods:
+                    continue
+                done_periods.add((job.name, job.period[0]))
+                label = date.fromisoformat(job.period[0])
             s3_key, dynamic = None, False
             if job.s3_key:
                 try:
@@ -98,8 +106,8 @@ def plan_items(rows: list[JobRow], start: date, end: date) -> list[PlannedItem]:
                 except KeyError:  # s3_weekly butuh kolom minggu dari baris pertama hasil query
                     dynamic = True
             row = by_name[job.name]
-            items.append(PlannedItem(job.name, d.isoformat(),
-                                     d.strftime("%Y%m%d") if is_range and job.needs_date else None,
+            items.append(PlannedItem(job.name, label.isoformat(),
+                                     label.strftime("%Y%m%d") if is_range and job.needs_date else None,
                                      row.template, row.args, job.output, s3_key, dynamic))
     return items
 

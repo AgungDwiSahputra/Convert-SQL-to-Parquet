@@ -245,6 +245,7 @@ export default function NewRunPage() {
                 <option value="all">Semua tipe</option>
                 <option value="daily">Harian</option>
                 <option value="weekly">Mingguan</option>
+                <option value="monthly">Bulanan</option>
                 <option value="master">Master</option>
               </select>
             </div>
@@ -288,7 +289,7 @@ export default function NewRunPage() {
             </div>
             {dateError && <p className="text-xs text-red-600">{dateError}</p>}
             <p className="text-xs text-gray-500">
-              Job harian dijalankan per tanggal. Job master dijalankan sekali dengan snapshot tanggal {mode === 'range' ? 'awal' : 'ini'}.
+              Job harian dijalankan per tanggal. Job mingguan/bulanan dijalankan sekali per minggu/bulan yang tersentuh rentang (menarik seluruh periode, berlabel awal periode). Job master dijalankan sekali dengan snapshot tanggal {mode === 'range' ? 'awal' : 'ini'}.
             </p>
           </Card>
 

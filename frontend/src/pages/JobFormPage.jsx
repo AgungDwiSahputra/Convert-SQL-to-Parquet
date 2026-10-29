@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { ArrowLeft, CheckCircle2, ChevronDown, CircleAlert, FlaskConical, Lock, Plus, Save, Trash2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, ChevronDown, CircleAlert, FlaskConical, Lock, Plus, Save, Sigma, Trash2 } from 'lucide-react'
 import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi, useDebounced } from '../lib/hooks'
 import { fmtDate, fmtNumber } from '../lib/format'
 import {
-  ADVANCED_TEMPLATES, CADENCE_LABEL, DAILY_TEMPLATES, bronzeMode, pickArgs, suggestDataset, suggestModule, suggestName,
+  ADVANCED_TEMPLATES, CADENCE_LABEL, DAILY_TEMPLATES, PERIOD_ENCODINGS, PERIOD_MODES, RESET_PERIOD_ARGS, bronzeMode, periodEncoding, pickArgs,
+  suggestDataset, suggestModule, suggestName, suggestPeriodColumns,
 } from '../lib/jobs'
 import { Alert, Badge, Button, Card, Field, LoadingBlock, Spinner, Toggle, inputClass } from '../components/ui'
 import { ColumnSelect, DbSelect, Err, TablePicker } from '../components/schema'
@@ -146,7 +147,9 @@ function TestResult({ result, stale, overrides, overrideTypes, onOverride, canOv
           <CheckCircle2 className="h-4 w-4" aria-hidden /> Query berhasil
         </span>
         <span className="text-gray-600">
-          {fmtNumber(result.rows)} baris{result.limit_hit ? ` (batas ${result.limit} tercapai — data sebenarnya lebih banyak)` : ''}
+          {fmtNumber(result.rows)} baris diperiksa{result.limit_hit
+            ? ` (batas ${result.limit} tercapai — data sebenarnya lebih banyak, lihat Hitung total baris)`
+            : result.rows > 0 ? ' (seluruh datanya)' : ''}
         </span>
         <span className="text-gray-500">{result.elapsed_s} dtk</span>
         <span className="text-gray-500">tanggal {fmtDate(result.target_date)}</span>
@@ -193,7 +196,7 @@ function TestResult({ result, stale, overrides, overrideTypes, onOverride, canOv
       )}
       {result.sample.length > 0 && (
         <div>
-          <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-500">Contoh data ({Math.min(result.sample.length, 10)} baris pertama)</p>
+          <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-500">Contoh data ({Math.min(result.sample.length, 10)} baris pertama dari {fmtNumber(result.rows)} yang diperiksa)</p>
           <div className="max-h-72 overflow-auto rounded-lg border border-gray-200">
             <table className="min-w-full text-xs">
               <thead className="sticky top-0 bg-gray-50">
@@ -241,11 +244,13 @@ export default function JobFormPage() {
   const [testDate, setTestDate] = useState('')
   const [testLimit, setTestLimit] = useState(100)
   const [test, setTest] = useState(null) // {loading, result, error, key}
+  const [count, setCount] = useState(null) // hitung total baris: {loading, result, error, key}
   const [enableNow, setEnableNow] = useState(false)
   const [confirmMove, setConfirmMove] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [showQuery, setShowQuery] = useState(false)
+  const [periodDetect, setPeriodDetect] = useState({}) // hasil deteksi kolom periode bulanan: {year, month, code} -> {loading | ok, message}
 
   // Edit: isi form dari job yang ada (sekali).
   useEffect(() => {
@@ -295,7 +300,8 @@ export default function JobFormPage() {
 
   // Validasi live (debounce)
   const payload = useMemo(() => (draft ? {
-    name: draft.name, template: draft.template, args: draft.args, original_name: isEdit ? editName : null, confirm_s3_move: confirmMove,
+    name: draft.name, template: draft.template, args: draft.args, cadence: draft.cadence || null,
+    original_name: isEdit ? editName : null, confirm_s3_move: confirmMove,
   } : null), [draft, isEdit, editName, confirmMove])
   const debounced = useDebounced(payload, 450)
   useEffect(() => {
@@ -310,12 +316,30 @@ export default function JobFormPage() {
   }, [debounced])
 
   const currentKey = JSON.stringify({ t: tpl, a: args })
+  const countKey = JSON.stringify({ t: tpl, a: args, d: testDate }) // total baris juga bergantung pada tanggal uji
   const testedOk = test?.result && test.key === currentKey
   const hasValue = (f) => (f === 'name' ? !!draft?.name : ![undefined, null, ''].includes(args[f]))
   const fieldError = (f) => (errors[f] && (attempted || errors[f] !== 'Wajib diisi.' || hasValue(f)) ? errors[f] : null)
   const blockingForTest = Object.keys(errors).filter((k) => !NON_BLOCKING_FOR_TEST.includes(k))
-  const needsDate = preview ? preview.needs_date : mode === 'daily' || mode === 'join' || !!args.needs_date
+  const isPeriod = mode in PERIOD_MODES
+  const encoding = mode === 'monthly' ? periodEncoding(tpl) : null // 'date' | 'parts' | 'code'
+  const needsDate = preview ? preview.needs_date : mode === 'daily' || mode === 'join' || isPeriod || !!args.needs_date
   const dateDetectBlocks = mode === 'daily' && detect && detect.ok === false && !detect.loading
+
+  // Bulanan (tahun + bulan / kode): saran kolom dari nama kolom, begitu kolom tabel termuat -- baik tabel dipilih
+  // dulu maupun jenis penyimpanannya. Hanya mengisi yang masih kosong; pengguna tetap bebas mengganti.
+  useEffect(() => {
+    if (isEdit || !draft || !meta || !colsData || !encoding || encoding === 'date') return
+    const s = suggestPeriodColumns(colsData.columns)
+    if (encoding === 'parts') {
+      if (!args.year_col && s.year) pickPeriodCol('year', s.year)
+      if (!args.month_col && s.month) pickPeriodCol('month', s.month)
+    } else if (!args.code_col && s.code) {
+      pickPeriodCol('code', s.code)
+    }
+    // pickPeriodCol dideklarasikan setelah early return di bawah -- sengaja hanya bereaksi pada kolom & jenis penyimpanan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colsData, encoding])
 
   if (isEdit && loadError) {
     return (
@@ -355,10 +379,55 @@ export default function JobFormPage() {
   }
 
   const setMode = (m) => {
+    if (m === mode) return
     setDetect(null)
+    setPeriodDetect({})
     if (m === 'daily') setTemplate(DAILY_TEMPLATES.includes(tpl) ? tpl : 'bronze_daily')
+    if (m in PERIOD_MODES) {
+      // Job periodik wajib berirama sama dengan periodenya (job_templates.fixed_cadence) -- irama lain dikembalikan ke Otomatis.
+      setDraft((d) => ({ ...d, cadence: d.cadence === m ? d.cadence : '' }))
+      // Kolom tanggal harian bisa bertipe teks/epoch -- tidak cocok untuk filter periode, jadi hanya dipertahankan kalau datetime.
+      const keep = columns.find((c) => c.name === args.date_col)?.date_kind === 'datetime' ? args.date_col : undefined
+      setTemplate(PERIOD_MODES[m], { ...RESET_PERIOD_ARGS, date_col: keep })
+    }
     if (m === 'master') setTemplate('bronze_master')
     if (m === 'join') setTemplate('bronze_daily_join', { join_db: args.join_db || args.db, alias: args.alias || 'c', join_alias: args.join_alias || 'p', date_col: undefined })
+  }
+
+  // Bulanan: pilih kolom periode (tahun / bulan / kode). Jenis kolom (angka/teks) diambil dari katalog; padding bulan
+  // teks & format kode ditebak dari contoh nilai (/schema/period-sample) -- tetap bisa diubah, dan diperiksa uji coba.
+  const PERIOD_FIELDS = { year: ['year_col', 'year_type'], month: ['month_col', 'month_type'], code: ['code_col', 'code_type'] }
+  const pickPeriodCol = async (role, colName) => {
+    const [colField, typeField] = PERIOD_FIELDS[role]
+    const col = columns.find((c) => c.name === colName)
+    const extras = { month: { month_pad: undefined }, code: { code_format: undefined } }[role] || {}
+    if (!col) {
+      setArgs({ [colField]: undefined, [typeField]: undefined, ...extras })
+      setPeriodDetect((d) => ({ ...d, [role]: null }))
+      return
+    }
+    setArgs({ [colField]: colName, [typeField]: col.value_type, ...extras })
+    setPeriodDetect((d) => ({ ...d, [role]: { loading: true } }))
+    try {
+      const r = await api(`/schema/period-sample?db=${enc(args.db)}&table=${enc(args.table)}&column=${enc(colName)}&role=${role}`)
+      setPeriodDetect((d) => ({ ...d, [role]: r.detected }))
+      if (role === 'month' && col.value_type === 'text' && r.detected.ok) setArgs({ month_pad: !!r.detected.month_pad })
+      if (role === 'code' && r.detected.code_format) setArgs({ code_format: r.detected.code_format })
+    } catch (e) {
+      setPeriodDetect((d) => ({ ...d, [role]: { ok: false, message: e.message } }))
+    }
+  }
+  const setEncoding = (key) => {
+    if (key === encoding) return
+    setDetect(null)
+    setPeriodDetect({})
+    setTemplate(PERIOD_ENCODINGS[key], RESET_PERIOD_ARGS)
+  }
+  const periodNote = (role) => {
+    const d = periodDetect[role]
+    if (!d) return null
+    if (d.loading) return <p className="flex items-center gap-2 text-xs text-gray-500"><Spinner /> Mengecek isi kolom…</p>
+    return <Alert tone={d.ok ? 'info' : 'warning'}>{d.ok ? d.message : `${d.message} Periksa lewat uji coba sebelum disimpan.`}</Alert>
   }
 
   // JOIN: join_on = "<alias>.<kolom anak> = <alias induk>.<kolom induk>"
@@ -380,6 +449,19 @@ export default function JobFormPage() {
       setTest({ result, key: currentKey })
     } catch (e) {
       setTest({ error: e.message, key: currentKey })
+    }
+  }
+
+  const runCount = async () => {
+    setCount({ loading: true, key: countKey })
+    try {
+      const result = await api('/jobs/test-count', {
+        method: 'POST',
+        body: { name: draft.name, template: tpl, args, original_name: isEdit ? editName : null, target_date: testDate || null },
+      })
+      setCount({ result, key: countKey })
+    } catch (e) {
+      setCount({ error: e.message, key: countKey })
     }
   }
 
@@ -462,8 +544,8 @@ export default function JobFormPage() {
           {!isAdvanced && (
             <>
               <Step n={1} title="Sumber data" description="Tabel di SQL Server yang akan disalin mentah (bronze) ke Parquet.">
-                <DbSelect id="db" value={args.db} error={fieldError('db')} onChange={(db) => { setDetect(null); setArgs({ db, table: undefined, date_col: undefined }) }} />
-                <TablePicker id="table" db={args.db} value={args.table} error={fieldError('table')} onChange={(table) => { setDetect(null); setArgs({ table, date_col: undefined }) }} />
+                <DbSelect id="db" value={args.db} error={fieldError('db')} onChange={(db) => { setDetect(null); setPeriodDetect({}); setArgs({ db, table: undefined, ...RESET_PERIOD_ARGS }) }} />
+                <TablePicker id="table" db={args.db} value={args.table} error={fieldError('table')} onChange={(table) => { setDetect(null); setPeriodDetect({}); setArgs({ table, ...RESET_PERIOD_ARGS }) }} />
                 {colsData && (
                   <p className="text-xs text-gray-500">
                     {columns.length} kolom{colsData.rows !== null ? ` · ±${fmtNumber(colsData.rows)} baris` : ' · view'}
@@ -471,10 +553,12 @@ export default function JobFormPage() {
                 )}
               </Step>
 
-              <Step n={2} title="Jenis data" description="Menentukan apakah data diambil per tanggal atau disalin penuh setiap run.">
+              <Step n={2} title="Jenis data" description="Menentukan apakah data diambil per hari, per minggu, per bulan, atau disalin penuh setiap run.">
                 <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Jenis data">
                   {[
                     ['daily', 'Harian', 'Difilter per tanggal lewat kolom tanggal tabel ini.'],
+                    ['weekly', 'Mingguan', 'Satu file per minggu (Senin–Minggu), difilter lewat kolom tanggal.'],
+                    ['monthly', 'Bulanan', 'Satu file per bulan kalender — lewat kolom tanggal, kolom tahun + bulan, atau kolom kode periode.'],
                     ['master', 'Master', 'Snapshot penuh setiap run (tabel referensi/kecil).'],
                     ['join', 'Harian via JOIN', 'Tabel tanpa kolom tanggal — filter lewat tabel induk.'],
                   ].map(([k, label, desc]) => (
@@ -521,6 +605,92 @@ export default function JobFormPage() {
                         <Err>{fieldError('date_format')}</Err>
                       </Field>
                     )}
+                  </>
+                )}
+
+                {isPeriod && (
+                  <>
+                    {mode === 'monthly' && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium text-gray-700">Periode di tabel ini disimpan sebagai</p>
+                        <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Penyimpanan periode">
+                          {[
+                            ['date', 'Kolom tanggal', 'Satu kolom date/datetime.'],
+                            ['parts', 'Kolom tahun + bulan', 'Dua kolom, mis. tahun=2026 dan bulan=10 (angka atau teks).'],
+                            ['code', 'Satu kolom kode', 'Mis. Periode = 202610 atau 2026-10.'],
+                          ].map(([k, label, desc]) => (
+                            <button
+                              key={k}
+                              type="button"
+                              role="radio"
+                              aria-checked={encoding === k}
+                              onClick={() => setEncoding(k)}
+                              className={`rounded-lg border px-3 py-2 text-left transition-colors ${encoding === k
+                                ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500'
+                                : 'border-gray-200 hover:border-gray-300'}`}
+                            >
+                              <p className="text-sm font-medium text-gray-800">{label}</p>
+                              <p className="mt-0.5 text-xs text-gray-500">{desc}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(mode === 'weekly' || encoding === 'date') && (
+                      <ColumnSelect
+                        id="period_date_col"
+                        label="Kolom tanggal"
+                        columns={columns}
+                        filter={(c) => c.date_kind === 'datetime'}
+                        value={args.date_col}
+                        onChange={(v) => setArgs({ date_col: v })}
+                        error={fieldError('date_col')}
+                        hint={args.table ? 'Hanya kolom bertipe date/datetime yang ditampilkan.' : 'Pilih tabel dulu.'}
+                      />
+                    )}
+                    {encoding === 'parts' && (
+                      <div className="space-y-4">
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <ColumnSelect id="year_col" label="Kolom tahun" columns={columns} filter={(c) => c.value_type} value={args.year_col}
+                            onChange={(v) => pickPeriodCol('year', v)} error={fieldError('year_col') || fieldError('year_type')}
+                            hint={args.table ? 'Kolom angka atau teks berisi tahun 4 digit.' : 'Pilih tabel dulu.'} />
+                          <ColumnSelect id="month_col" label="Kolom bulan" columns={columns} filter={(c) => c.value_type} value={args.month_col}
+                            onChange={(v) => pickPeriodCol('month', v)} error={fieldError('month_col') || fieldError('month_type')}
+                            hint={args.table ? 'Kolom angka atau teks berisi bulan 1–12.' : 'Pilih tabel dulu.'} />
+                        </div>
+                        {periodNote('year')}
+                        {periodNote('month')}
+                        {args.month_type === 'text' && (
+                          <Toggle id="month_pad" label="Bulan ditulis 2 digit (01–12)" description="Mati = bulan apa adanya tanpa nol di depan (1–12). Salah pilih = 0 baris — cek lewat uji coba."
+                            checked={!!args.month_pad} onChange={(v) => setArgs({ month_pad: v })} />
+                        )}
+                        <Err>{fieldError('month_pad')}</Err>
+                      </div>
+                    )}
+                    {encoding === 'code' && (
+                      <div className="space-y-4">
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <ColumnSelect id="code_col" label="Kolom kode periode" columns={columns} filter={(c) => c.value_type} value={args.code_col}
+                            onChange={(v) => pickPeriodCol('code', v)} error={fieldError('code_col') || fieldError('code_type')}
+                            hint={args.table ? 'Kolom angka atau teks, mis. 202610.' : 'Pilih tabel dulu.'} />
+                          {args.code_type === 'text' ? (
+                            <Field label="Format kode" htmlFor="code_format">
+                              <select id="code_format" className={selectClass} value={args.code_format || ''} onChange={(e) => setArgs({ code_format: e.target.value || undefined })}>
+                                <option value="">— pilih format —</option>
+                                {meta.period_code_formats.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+                              </select>
+                              <Err>{fieldError('code_format')}</Err>
+                            </Field>
+                          ) : args.code_type === 'number' && <p className="self-end pb-2 text-xs text-gray-500">Kolom angka: format YYYYMM.</p>}
+                        </div>
+                        {periodNote('code')}
+                      </div>
+                    )}
+                    <Alert tone="info">
+                      {mode === 'weekly'
+                        ? 'Satu run menarik seluruh minggu (Senin–Minggu) dan ditulis ke satu file di recorded_week=W{n}. Jadwalkan lewat Jadwal berirama mingguan (Minggu lalu).'
+                        : 'Satu run menarik seluruh bulan kalender dan ditulis ke satu file di recorded_month=MM. Jadwalkan lewat Jadwal berirama bulanan (Bulan lalu).'}
+                    </Alert>
                   </>
                 )}
 
@@ -630,14 +800,14 @@ export default function JobFormPage() {
             </div>
           </Step>
 
-          <Step n={isAdvanced ? 3 : 4} title="Uji coba" description="Menjalankan query dengan batas baris — tanpa membuat file atau upload, dan semua perubahan data di-rollback.">
+          <Step n={isAdvanced ? 3 : 4} title="Uji coba" description="Menjalankan query tanpa membuat file atau upload — semua perubahan data di-rollback.">
             <div className="flex flex-wrap items-end gap-3">
               {needsDate && (
-                <Field label="Tanggal data" htmlFor="test_date">
+                <Field label="Tanggal data" htmlFor="test_date" hint={isPeriod ? (mode === 'weekly' ? 'Uji coba menarik minggu yang memuat tanggal ini.' : 'Uji coba menarik bulan yang memuat tanggal ini.') : undefined}>
                   <input id="test_date" type="date" className={`${inputClass} max-w-44`} value={testDate} onChange={(e) => setTestDate(e.target.value)} />
                 </Field>
               )}
-              <Field label="Batas baris" htmlFor="test_limit">
+              <Field label="Baris diperiksa" htmlFor="test_limit">
                 <select id="test_limit" className={`${selectClass} max-w-28`} value={testLimit} onChange={(e) => setTestLimit(Number(e.target.value))}>
                   {[20, 100, 500].map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
@@ -645,8 +815,30 @@ export default function JobFormPage() {
               <Button icon={FlaskConical} loading={test?.loading} disabled={!validation || validating || blockingForTest.length > 0 || dateDetectBlocks} onClick={runTest}>
                 Jalankan uji coba
               </Button>
+              {!isAdvanced && (
+                <Button variant="secondary" icon={Sigma} loading={count?.loading} disabled={!validation || validating || blockingForTest.length > 0 || dateDetectBlocks} onClick={runCount}>
+                  Hitung total baris
+                </Button>
+              )}
             </div>
+            <p className="text-xs text-gray-500">
+              Uji coba menarik paling banyak sejumlah "Baris diperiksa" untuk dicek tipe datanya; tabel contoh menampilkan 10 baris pertama.
+              {!isAdvanced && ' Jumlah baris sebenarnya: Hitung total baris (bisa lambat di tabel besar tanpa index, maks 90 detik).'}
+            </p>
             {blockingForTest.length > 0 && <p className="text-xs text-gray-500">Lengkapi isian di langkah sebelumnya untuk bisa uji coba.</p>}
+            {count?.loading && <p className="flex items-center gap-2 text-sm text-gray-500"><Spinner /> Menghitung total baris…</p>}
+            {count?.error && <Alert tone="error" title="Hitung total gagal">{count.error}</Alert>}
+            {count?.result && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+                <span className="font-medium text-gray-800">
+                  Total {count.result.period
+                    ? `periode ${fmtDate(count.result.period[0])} – ${fmtDate(count.result.period[1])}`
+                    : count.result.needs_date ? `tanggal ${fmtDate(count.result.target_date)}` : 'seluruh tabel'}: {fmtNumber(count.result.total)} baris
+                </span>
+                <span className="text-gray-500">{count.result.elapsed_s} dtk</span>
+                {count.key !== countKey && <span className="text-amber-700">Isian atau tanggal berubah — hitung ulang untuk angka terbaru.</span>}
+              </div>
+            )}
             {test?.error && <Alert tone="error" title="Uji coba gagal">{test.error}</Alert>}
             {test?.result && (
               <TestResult
@@ -665,12 +857,18 @@ export default function JobFormPage() {
             <Field
               label="Irama data"
               htmlFor="cadence"
-              hint="Seberapa sering data sumber bertambah. Menentukan pembanding anomali volume: harian & snapshot per tanggal, mingguan & bulanan per periode lengkap."
+              hint={isPeriod
+                ? `Job ${CADENCE_LABEL[mode].toLowerCase()} selalu berirama ${CADENCE_LABEL[mode]} — irama lain membuat status kesegaran selalu salah dan job masuk jadwal yang keliru.`
+                : 'Seberapa sering data sumber bertambah. Menentukan pembanding anomali volume: harian & snapshot per tanggal, mingguan & bulanan per periode lengkap.'}
             >
               <select id="cadence" className={`${selectClass} sm:w-72`} value={draft.cadence} onChange={(e) => setDraft((d) => ({ ...d, cadence: e.target.value }))}>
                 <option value="">Otomatis{validation?.default_cadence ? ` (${CADENCE_LABEL[validation.default_cadence]})` : ''}</option>
-                {Object.entries(CADENCE_LABEL).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                {/* Job periodik: hanya irama periodenya (nilai tersimpan yang lain tetap ditampilkan supaya tidak tersembunyi -- ditolak saat simpan). */}
+                {Object.entries(CADENCE_LABEL)
+                  .filter(([v]) => !isPeriod || v === mode || v === draft.cadence)
+                  .map(([v, label]) => <option key={v} value={v}>{label}</option>)}
               </select>
+              <Err>{fieldError('cadence')}</Err>
             </Field>
             <Field label="Catatan (opsional)" htmlFor="notes" hint="Alasan pemilihan kolom, temuan data, dsb. — tampil di halaman detail job.">
               <textarea id="notes" rows={3} className={inputClass} value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} />

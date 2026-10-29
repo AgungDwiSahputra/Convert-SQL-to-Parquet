@@ -21,10 +21,10 @@ from pipeline.job_store import (
     master_snapshot_history, set_job_enabled, update_job,
 )
 from pipeline.job_templates import (
-    STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, default_cadence, s3_folder, s3_target_info,
+    PERIODCODE_FORMATS, STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, default_cadence, s3_folder, s3_target_info,
 )
 from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_job
-from webapp.catalog import CATALOG, CatalogError, TestRunBusy, test_run
+from webapp.catalog import CATALOG, CatalogError, TestRunBusy, count_rows, test_run
 from webapp.deps import current_user, get_db, require_role
 
 router = APIRouter()
@@ -87,7 +87,7 @@ def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
 
 def _validate_or_422(body: JobDraft, user: dict, db: sqlite3.Connection, original: JobRow | None):
     v = validate_job(body.name, body.template, body.args, role=user["role"], rows=load_job_rows(enabled_only=False),
-                     catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move)
+                     catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move, cadence=body.cadence)
     if not v.ok:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             {"message": "Periksa kembali isian job.", "errors": v.errors,
@@ -117,6 +117,7 @@ def templates(_user: dict = Depends(current_user)):
     return {
         "templates": [{"key": k, **v} for k, v in TEMPLATE_SPECS.items()],
         "strdate_formats": [{"value": k, "label": v} for k, v in STRDATE_FORMATS.items()],
+        "period_code_formats": [{"value": k, "label": v} for k, v in PERIODCODE_FORMATS.items()],
         "override_types": sorted(SIMPLE_ARROW_TYPES) + ["decimal128(18, 4)", "decimal128(38, 10)", "timestamp[us]"],
     }
 
@@ -126,7 +127,7 @@ def validate(body: JobDraft, user: dict = Depends(require_role("operator")), db:
     """Validasi draf TANPA menyimpan -- dipanggil form secara live (preview path S3, error per field)."""
     original = _get_or_404(db, body.original_name) if body.original_name else None
     v = validate_job(body.name, body.template, body.args, role=user["role"], rows=load_job_rows(enabled_only=False),
-                     catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move)
+                     catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move, cadence=body.cadence)
     try:
         cadence = default_cadence(body.template, body.args)
     except Exception:  # noqa: BLE001 -- draf belum lengkap
@@ -134,10 +135,8 @@ def validate(body: JobDraft, user: dict = Depends(require_role("operator")), db:
     return {**v.as_dict(), "default_cadence": cadence}
 
 
-@router.post("/test-run")
-def test_run_endpoint(body: TestRunIn, user: dict = Depends(require_role("operator")),
-                      db: sqlite3.Connection = Depends(get_db)):
-    """Uji coba draf (maks `limit` baris, tanpa file/upload, transaksi di-rollback). Divalidasi dulu."""
+def _draft_for_test(body: TestRunIn, user: dict, db: sqlite3.Connection) -> tuple:
+    """Draf job untuk uji coba / hitung total: divalidasi (tanpa aturan simpan), dibangun untuk tanggal uji -> (job, tanggal)."""
     original = _get_or_404(db, body.original_name) if body.original_name else None
     target = (body.target_date or date.fromisoformat(default_target_date())).isoformat()
     name = original.name if original else (body.name or "uji_coba")
@@ -148,7 +147,33 @@ def test_run_endpoint(body: TestRunIn, user: dict = Depends(require_role("operat
     if errors:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             {"message": "Perbaiki isian job sebelum uji coba.", "errors": errors})
-    job = build_job(name, body.template, body.args, target)
+    return build_job(name, body.template, body.args, target), target
+
+
+@router.post("/test-count")
+def test_count_endpoint(body: TestRunIn, user: dict = Depends(require_role("operator")),
+                        db: sqlite3.Connection = Depends(get_db)):
+    """Total baris draf untuk tanggal uji (query hitung DQ, tanpa batas baris). Divalidasi dulu seperti uji coba."""
+    job, target = _draft_for_test(body, user, db)
+    if not job.count_query:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Template ini tidak mendukung hitung total baris.")
+    try:
+        result = count_rows(job)
+    except TestRunBusy as e:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(e))
+    except CatalogError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
+    except Exception as e:  # noqa: BLE001 -- error SQL (mis. timeout di tabel besar tanpa index) -> tampilkan ke pengguna
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Hitung total gagal: {str(e).splitlines()[0][:300]}")
+    return {**result, "target_date": target, "needs_date": job.needs_date,
+            "period": list(job.period) if job.period else None}
+
+
+@router.post("/test-run")
+def test_run_endpoint(body: TestRunIn, user: dict = Depends(require_role("operator")),
+                      db: sqlite3.Connection = Depends(get_db)):
+    """Uji coba draf (maks `limit` baris, tanpa file/upload, transaksi di-rollback). Divalidasi dulu."""
+    job, target = _draft_for_test(body, user, db)
     try:
         result = test_run(job, body.limit)
     except TestRunBusy as e:

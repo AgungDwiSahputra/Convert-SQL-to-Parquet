@@ -43,7 +43,8 @@ LoadParquetProcess/
 | `migrate_jobs.py` | `jobs.py` → `jobs.db` + parity check (§4) | Menambah template pengganti helper `jobs.py` (`HELPER_TO_TEMPLATE`) |
 | `pipeline/export.py` | Mesin ekspor: deteksi schema, batching, tulis Parquet, upload S3, setup log | Jarang |
 | `pipeline/dq.py` | Pemeriksaan data quality per dataset sebelum upload (§6) | Aturan DQ berubah |
-| `pipeline/job_templates.py` | Template job + penyusun S3 key (`s3_daily`/`s3_weekly`/`s3_master`) | Pola query baru |
+| `pipeline/job_templates.py` | Template job + penyusun S3 key (`s3_daily`/`s3_weekly`/`s3_master`, `s3_week_of`/`s3_monthly` untuk bronze periodik) | Pola query baru |
+| `pipeline/periods.py` | Kalender periode: minggu PZO (`pzo_week`), `period_bounds()` minggu/bulan. Tanpa impor modul pipeline lain | Aturan minggu/bulan berubah |
 | `pipeline/job_validation.py` | Aturan validasi job dari Web UI | Aturan / template baru |
 | `pipeline/job_store.py` | Akses `jobs.db`: skema (`_MIGRATIONS`), `build_jobs()`, `default_target_date()` | Struktur tabel |
 | `pipeline/job.py` | `@dataclass Job` | Field baru |
@@ -89,7 +90,13 @@ Satu baris tabel `jobs` = satu dataset: nama + **template** + argumen JSON + akt
 `jobs.db` adalah sumber kebenaran dan diubah lewat Web UI (§9); setiap perubahan tercatat di
 `job_history`. Tiap job juga punya **irama data** (`jobs.cadence`: harian / mingguan / bulanan /
 snapshot) — kosong = ditebak dari template (`default_cadence()`: layout S3 harian → harian, master →
-snapshot, mingguan → mingguan). Irama menentukan pembanding anomali volume (§6). Semua nilai yang menentukan query & path S3 (database, tabel, layer, module, dataset,
+snapshot, mingguan → mingguan, bulanan → bulanan). Irama menentukan pembanding anomali volume (§6), status
+kesegaran & celah, email anomali 0 baris, dan jadwal mana yang mencakup job (§10) — **tidak** mengubah query
+maupun path S3. Jenis data (template) = cara data diambil; irama = seberapa sering data sumber bertambah.
+Template harian boleh berirama lebih kasar (tabel bertanggal harian yang datanya masuk seminggu/sebulan sekali),
+tapi job **mingguan/bulanan wajib berirama sama dengan jenisnya atau Otomatis** (`job_templates.fixed_cadence`,
+ditolak saat simpan): pemantauan tidak bisa lebih rinci dari cara data diambil — job bulanan berirama harian
+selalu tampil terlambat dan masuk jadwal berirama harian, bukan jadwal bulanannya. Semua nilai yang menentukan query & path S3 (database, tabel, layer, module, dataset,
 nama file, nama SP, linked server) disimpan **eksplisit per job**, jadi mengubah default di template
 tidak diam-diam memindahkan job lama. Satu-satunya setelan global yang ikut menentukan path S3:
 `S3_PREFIX`.
@@ -100,6 +107,10 @@ tidak diam-diam memindahkan job lama. Satu-satunya setelan global yang ikut mene
 | `bronze_daily_strdate` / `bronze_daily_strdate_eq` | Harian, kolom tanggal teks (`YYYY-MM-DD` rentang / format lain kesetaraan) | Operator, Admin |
 | `bronze_daily_epoch_ms` | Harian, kolom tanggal epoch milidetik | Operator, Admin |
 | `bronze_daily_join` | Harian, filter tanggal lewat JOIN tabel induk | Operator, Admin |
+| `bronze_weekly` | Mingguan: satu minggu Senin–Minggu per file, kolom tanggal datetime/date | Operator, Admin |
+| `bronze_monthly` | Bulanan: satu bulan kalender per file, periode di satu kolom `date`/`datetime` | Operator, Admin |
+| `bronze_monthly_ym` | Bulanan, periode di **dua kolom tahun + bulan** (angka atau teks, mis. `tahun=2026`, `bulan=10`) | Operator, Admin |
+| `bronze_monthly_code` | Bulanan, periode di **satu kolom kode** (angka `202610`, atau teks `202610` / `2026-10` / `10/2026`) | Operator, Admin |
 | `bronze_master` | Master, snapshot penuh tiap run | Operator, Admin |
 | `bronze_arcsde_view` | View ArcSDE lewat linked server | Admin |
 | `sp_job` | SP dispatcher — menjalankan ETL Load (**menulis** ke SQL Server) | Admin |
@@ -111,7 +122,9 @@ Field `Job` (`pipeline/job.py`):
 - `overrides` — paksa tipe Arrow per kolom; disimpan sebagai teks (mis. `"decimal128(18, 4)"`) dan
   dibaca lewat whitelist `parse_arrow_type()`, bukan `eval`.
 - `labels` — kolom target ML (hanya dicatat ke log). `s3_key` — fungsi penghasil key, `None` = tidak
-  diupload. `needs_date` — `False` untuk data master.
+  diupload. `needs_date` — `False` untuk data master. `period` — `(awal, akhir)` ISO untuk job periodik
+  (`bronze_weekly`/`bronze_monthly*`); `None` untuk job lain. `date_check` — satu spec atau **daftar** spec
+  (`bronze_monthly_ym` memeriksa kolom tahun dan kolom bulan sendiri-sendiri).
 
 **`jobs.py`** (format lama, gitignored) kini hanya untuk bootstrap environment baru:
 
@@ -132,6 +145,7 @@ beberapa tanggal uji, termasuk kabisat dan pergantian tahun. Ada beda → databa
 ```
 [prefix/]{layer}/{module}/{dataset}/recorded_year=YYYY/recorded_month=MM/recorded_day=DD/{file}      harian
 [prefix/]{layer}/{module}/{dataset}/recorded_year=YYYY/recorded_month=MM/recorded_week=W{n}/{file}   mingguan
+[prefix/]{layer}/{module}/{dataset}/recorded_year=YYYY/recorded_month=MM/{file}                      bulanan (hanya bronze_monthly*)
 [prefix/]{layer}/{module}/master_{dataset}/snapshot_date=YYYY-MM-DD/{file}                           master
 ```
 
@@ -146,6 +160,24 @@ Contoh: `bronze/ars/hk_transactions/recorded_year=2026/recorded_month=07/recorde
 - `s3_weekly` membaca `week_year`/`week_month`/`week_of_month` dari **baris pertama** hasil query
   (batas minggu ditentukan SQL Server, jangan dihitung ulang di Python). Itu sebabnya `s3_key` berupa
   fungsi yang menerima `first_row`.
+- **Bronze mingguan/bulanan** (`bronze_weekly`/`bronze_monthly*`, `Job.period`): satu run menarik SELURUH
+  periode yang memuat `target_date` (Senin–Minggu / bulan kalender) lalu menimpa satu file partisi periode itu.
+  Minggunya dihitung di Python (`periods.pzo_week`, konvensi PZO — tabel sumber tidak punya kolom `week_*`) dan
+  bentuk path-nya identik dengan `s3_weekly`, jadi inventaris S3 membacanya sama. Layout bulanan sengaja **tidak**
+  masuk `S3_LAYOUTS` (tujuan S3 `sp_job`/`custom_sql`): job itu jalan per tanggal, sehingga tiap run harian akan
+  menimpa file sebulan dengan datanya sendiri.
+- **Tiga template bulanan = tiga CARA tabel menyimpan periode**, bukan tiga tipe kolom (`job_templates.py`,
+  komentar di atas `PERIOD_VALUE_TYPES`): kolom tanggal (`bronze_monthly`), kolom tahun + bulan
+  (`bronze_monthly_ym`), satu kolom kode (`bronze_monthly_code`). Tipe kolom **angka** vs **teks** ditangani di
+  dalam template — angka: parameter `int`; teks: `CAST(? AS VARCHAR(32))` (index VARCHAR terpakai, §9) dan bulan
+  teks ditulis 2 digit (`'01'`) bila `month_pad`. Template tidak bisa bertanya ke SQL Server, jadi jenis kolom
+  (`year_type`/`month_type`/`code_type`) disimpan eksplisit di args dan **divalidasi ulang terhadap katalog**
+  (`job_validation._check_period_columns`) — args yang tidak cocok dengan tipe kolom sebenarnya ditolak. Format
+  kode periode dari whitelist `PERIODCODE_FORMATS`; kolom angka hanya `YYYYMM` (format lain kehilangan nol di depan).
+  Pola baru (mis. nama bulan teks, tahun fiskal) = encoding baru di sini, bukan template per tabel.
+- Baris yang kolom periodenya kosong / di luar domain (NULL, `-1`, bulan 15…) **tidak pernah ikut** job periodik
+  mana pun — sama seperti baris ber-tanggal NULL di job harian. Hitung DQ memakai filter yang sama, jadi
+  ketiadaannya tidak terlihat sebagai selisih baris.
 - Rancangan lama `source=`/`dataset=` tidak pernah diterapkan. Jangan "diperbaiki" di kode — semua
   path produksi sudah terkunci, dan mengubah bentuk path berarti memindahkan seluruh data di S3.
 
@@ -196,7 +228,9 @@ gold): folder baru hanya dibuat kalau data **berubah**, dideteksi dengan hash SH
   kecuali `--stop-on-error`.
 - Kredensial S3 di `.env` belum lengkap → upload dilewati dengan peringatan, bukan error.
 - Mode range: job harian dijalankan sekali per tanggal (file lokal diberi sufiks `_YYYYMMDD`), job
-  master sekali saja.
+  master sekali saja, job periodik (mingguan/bulanan) sekali per periode yang tersentuh range, berlabel
+  **awal periode** (Senin / tanggal 1) — label itu juga yang tercatat di `dq_results`. Periode yang gagal
+  dicoba lagi di tanggal berikutnya dalam periode yang sama. Satu tanggal tunggal pun dilabeli awal periodenya.
 - Exit code: `0` sukses, `2` ada job gagal, `1` error argumen/koneksi/database. Log ke console dan
   `logs/exporter_*.log`.
 
@@ -233,13 +267,15 @@ hanya mencerminkan load terakhir yang sukses. Riwayat eksekusi ada di Riwayat Ru
 
 | Pemeriksaan | Ditahan (upload tidak jalan) | Peringatan saja |
 |---|---|---|
-| **Jumlah baris**: `COUNT_BIG(*)` sumber vs baris tertulis. Query hitung = query ekspor dibungkus subquery (`count_query_for()`), dijalankan tepat sebelum ekstraksi di koneksi yang sama | Beda pada job harian untuk tanggal ≤ kemarin WIB (periode tutup) | Beda pada master / tanggal yang masih berjalan; gagal menghitung |
+| **Jumlah baris**: `COUNT_BIG(*)` sumber vs baris tertulis. Query hitung = query ekspor dibungkus subquery (`count_query_for()`), dijalankan tepat sebelum ekstraksi di koneksi yang sama | Beda pada job harian untuk tanggal ≤ kemarin WIB (periode tutup); job periodik: akhir periode ≤ kemarin | Beda pada master / tanggal atau periode yang masih berjalan; gagal menghitung |
 | **Skema** vs acuan (`jobs.schema_json` = skema terakhir yang dipublikasikan) | Kolom hilang, tipe berubah | Kolom baru |
 | **Rentang tanggal**: min/max kolom tanggal hasil vs `target_date` | Di luar tanggal proses (filter/format salah) | Kolom tidak ada / kosong semua |
 | **Volume** sesuai irama: harian & snapshot → per dataset vs median 14 tanggal terakhir (minimal 7); mingguan & bulanan → total periode lengkap (Senin–Minggu / satu bulan) vs median 8 minggu / 6 bulan, dinilai setelah run | — | Di luar 50%–200% median (ambang di tabel `settings`: `dq.volume_*`) |
 
 - Cakupan: hitung baris untuk template bronze kecuali ArcSDE; rentang tanggal untuk template harian
-  kecuali `bronze_daily_join` (kolom tanggalnya di tabel induk); `sp_job`/`custom_sql` hanya skema.
+  (termasuk `bronze_weekly`/`bronze_monthly`, rentangnya = seluruh periode; `bronze_monthly_ym`/`_code`: kolom
+  tahun, bulan, atau kode di hasil harus sama dengan periode bertarget — salah satu beda = ditahan) kecuali
+  `bronze_daily_join` (kolom tanggalnya di tabel induk); `sp_job`/`custom_sql` hanya skema.
 - **Ditahan** = item gagal dengan pesan `Ditahan DQ: …`; partisi lama di S3 tetap utuh, file lokal (kalau
   ada) ditinggal untuk diperiksa. Email run gagal, "Ulangi yang belum berhasil", dan exit code 2 CLI berlaku.
 - Skema acuan diperbarui **hanya setelah upload S3 sukses** (run `--skip-s3` tidak menggesernya) dan
@@ -310,7 +346,8 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   saklar **Ekspor** di halaman Users; jumlah yang menunggu tampil di Users, Pengaturan, dan Beranda admin.
   User yang ditambahkan admin langsung boleh.
 - **Run** dibuat dari halaman Jalankan atau dari jadwal. Semantiknya sama dengan CLI: job harian sekali
-  per tanggal, job master sekali dengan snapshot tanggal awal. Default opsi sama dengan
+  per tanggal, job master sekali dengan snapshot tanggal awal, job mingguan/bulanan sekali per periode
+  (`run_store.plan_items`; item berlabel awal periode). Default opsi sama dengan
   `run_exporter.bat`: upload S3 ya, simpan lokal tidak.
   - `run_items` menyimpan snapshot definisi job saat run dibuat (audit "dijalankan dengan definisi apa").
   - Beda kecil dengan CLI: job master yang gagal tidak dicoba ulang di tanggal berikutnya — pakai
@@ -341,11 +378,23 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
 
 **Wizard tambah job** (`frontend/src/pages/JobFormPage.jsx`):
 1. Pilih database & tabel dari metadata SQL Server (cache 2 menit).
-2. Untuk data harian, template **dipilih otomatis** dari tipe & isi kolom tanggal
-   (`webapp/catalog.detect_date_format`, minimal 75% contoh cocok). Format tak dikenal → tidak bisa disimpan.
+2. Jenis data: **Harian**, **Mingguan**, **Bulanan**, **Master**, atau **Harian via JOIN**. Untuk data harian,
+   template **dipilih otomatis** dari tipe & isi kolom tanggal (`webapp/catalog.detect_date_format`, minimal 75%
+   contoh cocok). Format tak dikenal → tidak bisa disimpan. **Mingguan** hanya menerima kolom `date`/`datetime`.
+   **Bulanan** menawarkan tiga cara penyimpanan periode — kolom tanggal, kolom tahun + bulan, atau satu kolom kode —
+   dengan kolom disarankan dari NAMA (`tahun/year`, `bulan/month`, `periode`; abaikan `tahunTanam`/`budget`),
+   jenis angka/teks dari katalog, dan padding bulan teks / format kode ditebak dari contoh nilai
+   (`GET /schema/period-sample`, `catalog.detect_period_column`; nilai distinct, jadi bulan cukup 50% cocok —
+   noise seperti `-1` atau `15` tidak menggagalkan). Hasil tebakan bersifat saran: **uji coba** (tanggal yang diuji
+   menentukan periodenya) tetap pemeriksa akhir, mis. salah padding = 0 baris.
 3. Modul, dataset, nama, dan file disarankan dari nama tabel; path S3 tampil live.
 4. **Uji coba**: `SET ROWCOUNT n`, transaksi selalu di-rollback, timeout 90 detik, maks 2 bersamaan.
-   Tidak menulis file maupun upload. Override tipe kolom bisa dipilih dari hasil schema.
+   Tidak menulis file maupun upload. Override tipe kolom bisa dipilih dari hasil schema. **Baris diperiksa**
+   (20/100/500) = jumlah baris yang ditarik dan dicek konversi tipe Parquet-nya; tabel contoh selalu 10 baris
+   pertama. Jumlah sebenarnya untuk tanggal/periode uji: tombol **Hitung total baris** (`POST /jobs/test-count`,
+   `catalog.count_rows`) — query hitung DQ (`job.count_query`, filter identik dengan ekspor) dengan pengaman yang
+   sama (slot bersama, timeout 90 detik, rollback). Bisa lambat/timeout di tabel besar tanpa index; tidak tersedia
+   untuk `sp_job`/`custom_sql`/ArcSDE (tanpa query hitung).
 5. Disimpan **nonaktif**; "Aktifkan sekarang" hanya bisa kalau uji coba berhasil untuk isian yang sama.
    Job aktif bernama `bronze_*` otomatis ikut `run_exporter.bat`.
 
@@ -379,7 +428,16 @@ jadi job baru yang cocok otomatis ikut. Jadwal baru **nonaktif**.
 | Bulan lalu | Tanggal 1 s/d akhir bulan sebelum tanggal jadwal |
 
 Rentang lebih dari satu hari: job **snapshot (master) tetap diambil sekali dengan label tanggal awal**
-rentang — form jadwal memperingatkan; buat jadwal master terpisah dengan satu tanggal.
+rentang — form jadwal memperingatkan; buat jadwal master terpisah dengan satu tanggal. Job **periodik**
+(`bronze_weekly`/`bronze_monthly`) diambil sekali per periode yang tersentuh rentang, berlabel awal periode:
+rentang "Minggu lalu" menghasilkan satu run per job mingguan (bukan 7), "Bulan lalu" satu run per job bulanan.
+Jadwalkan lewat cakupan **irama** mingguan/bulanan; kalau ikut run harian (`--only "bronze_*"`), periode yang
+sedang berjalan ditarik ulang setiap hari (hasil akhirnya tetap benar, hanya boros). Jadwal utama job periodik
+sebaiknya jalan **setelah periodenya tutup** (Senin untuk minggu lalu, tanggal 3 untuk bulan lalu). Sumber yang
+memuat ulang data lama (mis. `T_HMS_Produksi`, bulan lalu baru final sekitar tanggal 6–12) boleh ditambah run
+penyembuhan tengah bulan (tanggal 15, "Beberapa hari terakhir" 31 hari = bulan lalu + bulan berjalan). Run
+tengah bulan saja tidak cukup: ia hanya meliput bulan berjalan s/d tanggal 14, sehingga job tampil
+"Terlambat" sejak tanggal 3 sampai run berikutnya.
 
 Susunan yang disarankan (proses sumber WM untuk H-1 berjalan mulai 00:01, selesai sekitar 01:00–02:00):
 
@@ -393,6 +451,11 @@ Susunan yang disarankan (proses sumber WM untuk H-1 berjalan mulai 00:01, selesa
 **Kesegaran data** (`pipeline/freshness.py`): per job, tanggal terbaru yang **sudah diproses** — ada
 hasil di `dq_results` yang tidak ditahan DQ dan sudah dipublikasikan atau memang 0 baris (run uji
 `--skip-s3` berisi data tidak dihitung), **atau** partisinya ada di S3 menurut inventaris S3 (di bawah).
+Job periodik: satu hasil (berlabel awal periode) meliput hari-hari periodenya **sampai sehari sebelum run itu
+terjadi** (`freshness.cover_periods`; waktu run = `dq_results.created_at`, untuk inventaris S3 = waktu upload file
+partisinya). Run di tengah periode hanya meliput sebagian — tanpa batas ini, run Rabu yang tidak pernah disusul
+run lain membuat seluruh minggu tampil "Segar" padahal file di S3 hanya berisi Senin–Selasa. Volume per periode
+dinilai dari satu hasil itu setelah periodenya lewat.
 Dibandingkan dengan tanggal yang diharapkan: harian/snapshot
 H-1, mingguan Minggu lalu, bulanan akhir bulan lalu (mulai tanggal 3). Tampil sebagai badge
 **Segar / Terlambat / Belum ada data** di Daftar Job (ada filter "Aktif · terlambat"), detail job, dan
@@ -418,8 +481,9 @@ daftar periodenya, Beranda) dan di email penjaga.
 **Inventaris S3** (`pipeline/s3_inventory.py`, tabel `s3_inventory`): `dq_results` hanya berisi run yang
 dicatat pipeline ini, jadi upload sebelum fitur DQ ada atau dari CLI dengan `jobs.db` lain tidak terlihat.
 Sekali sehari (default **aktif**, jam 05:30 WIB) worker me-list folder S3 tiap job aktif berirama
-harian/mingguan/bulanan (layout harian/mingguan; master tidak) dan mencatat tanggal partisinya — partisi
-mingguan `recorded_week=W{n}` dicatat sebagai 7 hari minggu itu (konvensi PZO). Hanya membaca S3 (butuh izin
+harian/mingguan/bulanan (layout harian/mingguan/bulanan; master tidak) dan mencatat tanggal partisinya —
+partisi mingguan `recorded_week=W{n}` dicatat sebagai 7 hari minggu itu (konvensi PZO), partisi bulanan
+(`recorded_month=MM` tanpa partisi di bawahnya) sebagai seluruh hari bulan itu. Hanya membaca S3 (butuh izin
 `s3:ListBucket`), ±1 request per job; isi per job diganti penuh tiap pindai, gagal pindai tidak menghapus isi
 lama. Manual: tombol **Pindai sekarang** di Pengaturan → Data quality, atau `python manage.py scan-s3`.
 

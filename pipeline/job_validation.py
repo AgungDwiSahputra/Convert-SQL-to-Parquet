@@ -21,7 +21,8 @@ from typing import Protocol
 
 from pipeline.job_store import JobRow, default_target_date
 from pipeline.job_templates import (
-    DATE_VARS, S3_LAYOUTS, SAMPLE_FIRST_ROW, STRDATE_FORMATS, TEMPLATES, build_job, parse_arrow_type, s3_folder,
+    DATE_VARS, NUMERIC_PERIODCODE_FORMATS, PERIOD_VALUE_TYPES, PERIODCODE_FORMATS, S3_LAYOUTS, SAMPLE_FIRST_ROW,
+    STRDATE_FORMATS, TEMPLATES, build_job, fixed_cadence, parse_arrow_type, period_kind, s3_folder,
 )
 
 ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
@@ -33,6 +34,10 @@ TEMPLATE_SPECS = {
     "bronze_daily_strdate_eq": {"label": "Harian — kolom tanggal teks format lain", "role": "operator", "kind": "bronze"},
     "bronze_daily_epoch_ms": {"label": "Harian — kolom tanggal epoch milidetik", "role": "operator", "kind": "bronze"},
     "bronze_daily_join": {"label": "Harian — filter tanggal lewat JOIN tabel induk", "role": "operator", "kind": "bronze"},
+    "bronze_weekly": {"label": "Mingguan — satu minggu (Senin–Minggu) per file", "role": "operator", "kind": "bronze"},
+    "bronze_monthly": {"label": "Bulanan — satu bulan kalender per file", "role": "operator", "kind": "bronze"},
+    "bronze_monthly_ym": {"label": "Bulanan — periode di kolom tahun + kolom bulan", "role": "operator", "kind": "bronze"},
+    "bronze_monthly_code": {"label": "Bulanan — periode di satu kolom kode (mis. 202610)", "role": "operator", "kind": "bronze"},
     "bronze_master": {"label": "Master — snapshot penuh tiap run", "role": "operator", "kind": "bronze"},
     "bronze_arcsde_view": {"label": "ArcSDE view lewat linked server", "role": "admin", "kind": "advanced"},
     "sp_job": {"label": "SP dispatcher (menjalankan ETL Load)", "role": "admin", "kind": "advanced"},
@@ -44,9 +49,14 @@ assert set(TEMPLATE_SPECS) == set(TEMPLATES), "setiap template wajib punya spesi
 DATETIME_TYPES = {"date", "datetime", "datetime2", "smalldatetime", "datetimeoffset"}
 STRING_TYPES = {"varchar", "nvarchar", "char", "nchar"}
 EPOCH_TYPES = {"bigint"}
+NUMERIC_TYPES = {"int", "smallint", "bigint", "tinyint", "decimal", "numeric"}
+# Jenis kolom periode di args (year_type / month_type / code_type) -> tipe SQL Server yang sah untuk jenis itu.
+PERIOD_COL_TYPES = {"number": NUMERIC_TYPES, "text": STRING_TYPES}
 DATE_COL_TYPES = {
     "bronze_daily": DATETIME_TYPES,
     "bronze_daily_join": DATETIME_TYPES,
+    "bronze_weekly": DATETIME_TYPES,
+    "bronze_monthly": DATETIME_TYPES,
     "bronze_daily_strdate": STRING_TYPES,
     "bronze_daily_strdate_eq": STRING_TYPES,
     "bronze_daily_epoch_ms": EPOCH_TYPES,
@@ -249,17 +259,38 @@ def _check_template_args(template: str, args: dict, c: _Checker) -> None:
         c.err(n, "Field tidak dikenal untuk template ini.")
 
 
+def _check_period_columns(a: dict, c: _Checker, table_info: dict | None, pairs: tuple) -> None:
+    """
+    Kolom periode bulanan (tahun / bulan / kode): ada di tabel dan tipenya cocok dengan jenis yang dideklarasikan
+    di args (angka / teks). Template tidak bisa bertanya ke SQL Server, jadi di sinilah args yang bohong tertolak.
+    Peringatan kalau tabel besar dan tidak ada satu pun kolom periode yang menjadi kolom pertama sebuah index.
+    """
+    infos = []
+    for col_field, type_field in pairs:
+        kind = a.get(type_field)
+        if kind not in PERIOD_VALUE_TYPES:
+            c.err(type_field, f"Pilih salah satu: {', '.join(PERIOD_VALUE_TYPES)}.")
+            continue
+        if table_info:
+            infos.append(c.column(col_field, a["db"], a["table"], a.get(col_field), PERIOD_COL_TYPES[kind], bracketed=True))
+    if table_info and infos and all(i is not None for i in infos) and not any(i.get("leading_index") for i in infos) \
+            and (table_info.get("rows") or 0) > BIG_MASTER_ROWS:
+        c.v.warnings.append(f"Kolom periode tidak punya index & tabel besar ({table_info['rows']:,} baris) — "
+                            f"filter periode akan memindai seluruh tabel.")
+
+
 def _check_bronze(template: str, a: dict, c: _Checker) -> None:
     v = c.v
     db_ok = c.database("db", a.get("db"))
     table_info = c.table("table", a["db"], a.get("table")) if db_ok else None
-    if template in ("bronze_daily", "bronze_daily_strdate", "bronze_daily_strdate_eq", "bronze_daily_epoch_ms"):
+    if template in ("bronze_daily", "bronze_daily_strdate", "bronze_daily_strdate_eq", "bronze_daily_epoch_ms",
+                    "bronze_weekly", "bronze_monthly"):
         if table_info:
             col = c.column("date_col", a["db"], a["table"], a.get("date_col"), DATE_COL_TYPES[template],
                            bracketed=template == "bronze_daily_epoch_ms")
             if col and not col.get("leading_index") and (table_info.get("rows") or 0) > BIG_MASTER_ROWS:
                 v.warnings.append(f"Kolom {a['date_col']} tidak punya index & tabel besar "
-                                  f"({table_info['rows']:,} baris) — filter harian akan memindai seluruh tabel.")
+                                  f"({table_info['rows']:,} baris) — filter tanggal akan memindai seluruh tabel.")
         if template == "bronze_daily_strdate_eq" and a.get("date_format") not in STRDATE_FORMATS:
             c.err("date_format", "Pilih format tanggal yang didukung.")
     elif template == "bronze_daily_join":
@@ -282,6 +313,21 @@ def _check_bronze(template: str, a: dict, c: _Checker) -> None:
             else:
                 c.column("join_on", a["db"], a["table"], sides[a["alias"]])
                 c.column("join_on", a["join_db"], a["join_table"], sides[a["join_alias"]])
+    elif template == "bronze_monthly_ym":
+        _check_period_columns(a, c, table_info, (("year_col", "year_type"), ("month_col", "month_type")))
+        if a.get("month_pad") not in (None, False, True):
+            c.err("month_pad", "Harus ya / tidak.")
+        elif a.get("month_pad") and a.get("month_type") != "text":
+            c.err("month_pad", "Hanya untuk kolom bulan bertipe teks.")
+        if a.get("year_col") and str(a.get("year_col")).lower() == str(a.get("month_col")).lower():
+            c.err("month_col", "Kolom bulan harus beda dengan kolom tahun.")
+    elif template == "bronze_monthly_code":
+        _check_period_columns(a, c, table_info, (("code_col", "code_type"),))
+        fmt = a.get("code_format")
+        if fmt not in PERIODCODE_FORMATS:
+            c.err("code_format", "Pilih format kode periode yang didukung.")
+        elif a.get("code_type") == "number" and fmt not in NUMERIC_PERIODCODE_FORMATS:
+            c.err("code_format", f"Kolom angka hanya mendukung {', '.join(PERIODCODE_FORMATS[f] for f in NUMERIC_PERIODCODE_FORMATS)}.")
     elif template == "bronze_master":
         if table_info and (table_info.get("rows") or 0) > BIG_MASTER_ROWS:
             v.warnings.append(f"Tabel {a['table']} berisi {table_info['rows']:,} baris dan akan ditarik PENUH "
@@ -340,10 +386,10 @@ def _check_advanced(template: str, a: dict, c: _Checker) -> None:
 
 def validate_job(name: str, template: str, args: dict, *, role: str, rows: list[JobRow], catalog: Catalog,
                  original: JobRow | None = None, confirm_s3_move: bool = False,
-                 target_date: str | None = None) -> Validation:
+                 target_date: str | None = None, cadence: str | None = None) -> Validation:
     """
     Validasi draf job (create kalau original=None, edit kalau ada). `rows` = SEMUA job (untuk cek
-    keunikan). Tidak menulis apa pun.
+    keunikan). `cadence` = irama yang dipilih di form (None = Otomatis). Tidak menulis apa pun.
     """
     v = Validation()
     c = _Checker(catalog, v)
@@ -359,6 +405,11 @@ def validate_job(name: str, template: str, args: dict, *, role: str, rows: list[
     if not isinstance(args, dict):
         v.errors["args"] = "Format parameter tidak valid."
         return v
+    fixed = fixed_cadence(template)
+    if cadence and fixed and cadence != fixed:
+        label = {"weekly": "Mingguan", "monthly": "Bulanan"}[fixed]
+        v.errors["cadence"] = (f"Job {label.lower()} wajib berirama {label} (atau Otomatis) — irama lain membuat "
+                               f"status kesegaran selalu salah dan job masuk jadwal yang keliru.")
 
     if original is None:
         if not isinstance(name, str) or not JOB_NAME.fullmatch(name) or name in RESERVED_NAMES:
@@ -369,10 +420,10 @@ def validate_job(name: str, template: str, args: dict, *, role: str, rows: list[
         name = original.name
 
     _check_template_args(template, args, c)
-    if not v.errors.keys() - {"name", "template"}:  # field lengkap -> cek isi
+    if not v.errors.keys() - {"name", "template", "cadence"}:  # field lengkap -> cek isi
         (_check_bronze if TEMPLATE_SPECS[template]["kind"] == "bronze" else _check_advanced)(template, args, c)
 
-    if v.errors:
+    if v.errors.keys() - {"cadence"}:   # irama salah tetap menampilkan preview path S3 & query
         return v
 
     try:
@@ -410,6 +461,10 @@ def validate_job(name: str, template: str, args: dict, *, role: str, rows: list[
 
     if not template.startswith("sp_") and name.startswith("bronze_"):
         v.warnings.append('Kalau diaktifkan, job ini otomatis ikut jadwal run_exporter.bat (--only "bronze_*").')
+    if period_kind(template) and name.startswith("bronze_"):
+        v.warnings.append("Job mingguan/bulanan menarik satu periode penuh tiap dijalankan — kalau ikut run harian "
+                          "(run_exporter.bat), periode yang sedang berjalan ditarik ulang setiap hari. Lebih hemat "
+                          "dengan jadwal berirama mingguan/bulanan di halaman Jadwal.")
     if folder and not (args.get("module") or (args.get("s3") or {}).get("module")):
         v.warnings.append("Modul kosong — path S3 tanpa segmen modul (sebaiknya diisi, mis. hms/iot/pzo).")
 

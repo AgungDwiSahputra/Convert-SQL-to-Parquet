@@ -13,6 +13,7 @@ DATA QUALITY BRONZE -- pemeriksaan per dataset SETELAH Parquet ditulis dan SEBEL
                 Harian & snapshot: per dataset, vs 14 tanggal terakhir. Mingguan & bulanan: per PERIODE
                 (total 1 minggu / 1 bulan yang sudah lengkap) vs 8 minggu / 6 bulan sebelumnya, dinilai
                 setelah run (period_volume_findings) -- per hari volumenya memang tidak rata.
+                Job periodik bronze (Job.period): satu hasil berlabel awal periode = seluruh periode.
 
 Satu saja 'blocked' -> DQBlocked: upload ditahan, partisi lama di S3 tetap utuh, item dicatat gagal.
 Perubahan skema yang disengaja: `python manage.py accept-schema <job>` lalu jalankan ulang.
@@ -22,6 +23,7 @@ Riwayat hasil (baseline volume) di tabel dq_results, diisi CLI & worker lewat af
 from __future__ import annotations
 
 import datetime as _dt
+import decimal
 import json
 import statistics
 from dataclasses import dataclass, field
@@ -34,7 +36,8 @@ from pipeline.app_settings import get_settings
 from pipeline.job_store import (
     default_target_date, dq_latest_rows, get_job_row, get_schema_baseline, record_dq_result, save_schema_baseline,
 )
-from pipeline.job_templates import default_cadence
+from pipeline.job_templates import default_cadence, period_kind
+from pipeline.periods import period_bounds
 
 OK, WARNING, BLOCKED, UNCHECKED = "ok", "warning", "blocked", "unchecked"
 _RANK = {UNCHECKED: 0, OK: 1, WARNING: 2, BLOCKED: 3}
@@ -169,6 +172,13 @@ def schema_signature(schema: pa.Schema) -> list:
     return [[f.name, str(f.type)] for f in schema if f.name not in AUDIT_COLUMNS]
 
 
+def date_specs(date_check) -> list[dict]:
+    """job.date_check -> daftar spec (kosong / satu dict / daftar dict)."""
+    if not date_check:
+        return []
+    return [date_check] if isinstance(date_check, dict) else list(date_check)
+
+
 def date_column_index(field_names: list[str], date_check: dict | None) -> int | None:
     """Posisi kolom tanggal di hasil (nama dicocokkan tanpa beda huruf besar/kecil, seperti SQL Server)."""
     if not date_check:
@@ -193,11 +203,13 @@ class MinMax:
 
 
 def audit(job, ctx: AuditContext, source_rows: int | None, source_error: str | None, written_rows: int,
-          schema: pa.Schema, date_found: bool, date_minmax: MinMax | None) -> DQReport:
+          schema: pa.Schema, date_checks: list[tuple[dict, bool, MinMax | None]]) -> DQReport:
+    """date_checks: satu entri per spec job.date_check -- (spec, kolomnya ada di hasil, min/max-nya)."""
     report = DQReport(source_rows=source_rows, written_rows=written_rows, schema=schema_signature(schema))
     _check_rows(report, job, ctx, source_rows, source_error, written_rows)
     _check_schema(report, ctx.schema_baseline)
-    _check_date_range(report, job.date_check, written_rows, date_found, date_minmax)
+    for spec, found, mm in date_checks:
+        _check_date_range(report, spec, written_rows, found, mm)
     _check_volume(report, ctx, written_rows)
     return report
 
@@ -219,8 +231,12 @@ def should_save_baseline(job, result, ctx: AuditContext) -> bool:
 # ---------------------------------------------------------------------------
 
 def _is_closed_period(job, target_date: str) -> bool:
-    """Job harian untuk tanggal yang sudah lewat (<= kemarin WIB) -> data sumber dianggap final."""
-    return job.needs_date and target_date <= default_target_date()
+    """
+    Job harian untuk tanggal yang sudah lewat (<= kemarin WIB) -> data sumber dianggap final. Job periodik
+    (mingguan/bulanan): final kalau AKHIR periodenya sudah lewat -- periode yang masih berjalan terus bertambah.
+    """
+    end = job.period[1] if job.period else target_date
+    return job.needs_date and end <= default_target_date()
 
 
 def _check_rows(report, job, ctx, source_rows, source_error, written_rows) -> None:
@@ -269,8 +285,7 @@ def _check_date_range(report, spec, written_rows, date_found, mm) -> None:
         return
     if "equals" in spec:
         want = str(spec["equals"])
-        # rstrip: kesetaraan VARCHAR di SQL Server mengabaikan spasi di belakang
-        ok = str(mm.min).rstrip() == want and str(mm.max).rstrip() == want
+        ok = _same(mm.min, want) and _same(mm.max, want)
         expected = f"= {want}"
     else:
         lo, hi = spec["min"], spec["max_excl"]
@@ -308,11 +323,7 @@ def _volume_verdict(value: int, history: list, rules: VolumeRules, unit: str) ->
 
 def period_of(cadence: str, d: _dt.date) -> tuple[_dt.date, _dt.date]:
     """Periode yang memuat tanggal d: minggu Senin-Minggu, atau satu bulan kalender."""
-    if cadence == "weekly":
-        start = d - _dt.timedelta(days=d.weekday())
-        return start, start + _dt.timedelta(days=6)
-    start = d.replace(day=1)
-    return start, (start + _dt.timedelta(days=32)).replace(day=1) - _dt.timedelta(days=1)
+    return period_bounds("week" if cadence == "weekly" else "month", d)
 
 
 def run_period_findings(conn, executed: dict) -> list[dict]:
@@ -320,14 +331,19 @@ def run_period_findings(conn, executed: dict) -> list[dict]:
     rules = VolumeRules.load(conn)
     findings = []
     for name, (cadence, dates) in executed.items():
-        findings += period_volume_findings(conn, name, cadence, dates, rules)
+        row = get_job_row(conn, name)
+        findings += period_volume_findings(conn, name, cadence, dates, rules,
+                                           whole_period=bool(row and period_kind(row.template)))
     return findings
 
 
-def period_volume_findings(conn, name: str, cadence: str, target_dates, rules: VolumeRules) -> list[dict]:
+def period_volume_findings(conn, name: str, cadence: str, target_dates, rules: VolumeRules,
+                           whole_period: bool = False) -> list[dict]:
     """
     Volume per periode untuk job mingguan/bulanan: total periode yang memuat target_dates (hanya kalau
-    periodenya LENGKAP -- semua tanggal sudah punya hasil) vs median total periode lengkap sebelumnya.
+    periodenya LENGKAP) vs median total periode lengkap sebelumnya. Lengkap = semua tanggal periode sudah
+    punya hasil (job yang dijalankan per tanggal), atau -- whole_period, job periodik bronze yang sekali run
+    menarik seluruh periode dan dilabeli awal periode -- periodenya sudah lewat (akhir <= kemarin WIB).
     Return hanya temuan peringatan: [{job_name, period, message}].
     """
     if cadence not in PERIOD_HISTORY:
@@ -337,7 +353,9 @@ def period_volume_findings(conn, name: str, cadence: str, target_dates, rules: V
         p = period_of(cadence, _dt.date.fromisoformat(r["target_date"]))
         totals[p] = totals.get(p, 0) + (r["rows"] or 0)
         counts[p] = counts.get(p, 0) + 1
-    complete = {p: t for p, t in totals.items() if counts[p] == (p[1] - p[0]).days + 1}
+    yesterday = _dt.date.fromisoformat(default_target_date())
+    complete = {p: t for p, t in totals.items()
+                if (p[1] <= yesterday if whole_period else counts[p] == (p[1] - p[0]).days + 1)}
     unit = "minggu" if cadence == "weekly" else "bulan"
     need = max(3, PERIOD_HISTORY[cadence] // 2)
     findings = []
@@ -351,6 +369,20 @@ def period_volume_findings(conn, name: str, cadence: str, target_dates, rules: V
         if status == WARNING:
             findings.append({"job_name": name, "period": f"{p[0]} s/d {p[1]}", "message": message})
     return findings
+
+
+def _same(value, want: str) -> bool:
+    """
+    Nilai hasil sama dengan nilai filter. rstrip: kesetaraan VARCHAR di SQL Server mengabaikan spasi di belakang.
+    Kolom desimal (mis. decimal(10,2)) dibaca '10.00' padahal filternya 10 -> dibandingkan sebagai angka.
+    """
+    s = str(value).rstrip()
+    if s == want:
+        return True
+    try:
+        return decimal.Decimal(s) == decimal.Decimal(want)
+    except decimal.InvalidOperation:
+        return False
 
 
 def _comparable(value, like):

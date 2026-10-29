@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from pipeline.job_validation import DATETIME_TYPES, EPOCH_TYPES, STRING_TYPES
-from webapp.catalog import CATALOG, CatalogError, detect_date_format
+from webapp.catalog import CATALOG, CatalogError, detect_date_format, detect_period_column, period_value_type
 from webapp.deps import require_role
 
 router = APIRouter()
@@ -43,7 +45,8 @@ def tables(db: str = Query(...), _user: dict = Depends(require_role("operator"))
 def columns(db: str = Query(...), table: str = Query(...), _user: dict = Depends(require_role("operator"))):
     data = _call(CATALOG.columns, db, table)
     return {"rows": _call(CATALOG.table_rows, db, table),
-            "columns": [{"name": n, **info, "date_kind": _date_kind(info["type"])} for n, info in data.items()]}
+            "columns": [{"name": n, **info, "date_kind": _date_kind(info["type"]),
+                         "value_type": period_value_type(info["type"])} for n, info in data.items()]}
 
 
 @router.get("/sample")
@@ -58,3 +61,16 @@ def sample(db: str = Query(...), table: str = Query(...), column: str = Query(..
     detected = detect_date_format(values, info["type"]) if _date_kind(info["type"]) in ("string", "epoch") else \
         {"ok": True, "template": "bronze_daily", "date_format": None, "message": f"Tipe {info['type']} — filter rentang per hari."}
     return {"values": [str(v) for v in values], "detected": detected}
+
+
+@router.get("/period-sample")
+def period_sample(db: str = Query(...), table: str = Query(...), column: str = Query(...),
+                  role: Literal["year", "month", "code"] = Query(...), _user: dict = Depends(require_role("operator"))):
+    """Contoh nilai kolom periode bulanan (tahun / bulan / kode) + tebakan jenis & format yang tepat."""
+    cols = _call(CATALOG.columns, db, table)
+    info = next((v for k, v in cols.items() if k.lower() == column.lower()), None)
+    if info is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Kolom '{column}' tidak ada.")
+    # Bulan: ambil lebih banyak nilai unik supaya bulan 1-9 (pembeda '1' vs '01') ikut terlihat.
+    values = _call(CATALOG.sample_values, db, table, column, 40 if role == "month" else 12)
+    return {"values": [str(v) for v in values][:12], "detected": detect_period_column(values, info["type"], role)}

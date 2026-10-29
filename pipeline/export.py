@@ -236,8 +236,10 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
     ingested_at = datetime.now(timezone.utc)
     schema = schema.append(pa.field("_ingested_at", pa.timestamp("us", tz="UTC")))
     log.info("[%s] schema: %s", tag, ", ".join(f"{f.name}:{f.type}" for f in schema))
-    date_idx = dq.date_column_index(data_field_names, job.date_check) if audit else None
-    date_mm = dq.MinMax() if date_idx is not None else None
+    # Kolom tanggal/periode yang diperiksa DQ (satu entri per spec job.date_check): posisi + min/max-nya.
+    date_cols = [(spec, dq.date_column_index(data_field_names, spec)) for spec in dq.date_specs(job.date_check)] \
+        if audit else []
+    date_mms = [dq.MinMax() if idx is not None else None for _spec, idx in date_cols]
     # Job master: hash data untuk snapshot berbasis perubahan (dihitung saat streaming, tanpa baca ulang).
     hasher = snapshots.DataHasher(data_field_names, dq.schema_signature(schema)) \
         if audit and job.change_snapshot else None
@@ -255,8 +257,9 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
             if first_row is None:
                 first_row = dict(zip(data_field_names, rows[0]))
             table = rows_to_table(rows, schema, ingested_at)
-            if date_mm:
-                date_mm.update(table.column(date_idx))
+            for (_spec, idx), mm in zip(date_cols, date_mms):
+                if mm:
+                    mm.update(table.column(idx))
             if hasher:
                 hasher.update(table)
             writer.write_table(table)
@@ -284,7 +287,8 @@ def run_job(conn: pyodbc.Connection, job, batch_size: int, compression, s3_clien
 
     report = None
     if audit:
-        report = dq.audit(job, audit, source_rows, source_error, total, schema, date_idx is not None, date_mm)
+        report = dq.audit(job, audit, source_rows, source_error, total, schema,
+                          [(spec, idx is not None, mm) for (spec, idx), mm in zip(date_cols, date_mms)])
         log.log(logging.WARNING if report.status in (dq.WARNING, dq.BLOCKED) else logging.INFO,
                 "[%s] DQ %s: %s", tag, report.status.upper(),
                 report.summary((dq.OK, dq.WARNING, dq.BLOCKED)) or "tidak ada pemeriksaan untuk job ini")

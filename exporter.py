@@ -24,6 +24,8 @@ Catatan mode range (--start-date/--end-date):
       supaya tidak saling menimpa. S3 key sudah unik per tanggal sejak awal.
     - Job master (dev, estate, block, dst -- tidak butuh @TargetDate) HANYA
       dijalankan sekali untuk seluruh range (datanya tidak tergantung tanggal).
+    - Job periodik (bronze mingguan/bulanan) menarik SELURUH minggu/bulan yang memuat tanggalnya, jadi
+      dijalankan sekali per periode yang tersentuh range, berlabel awal periode (Senin / tanggal 1).
 """
 
 from __future__ import annotations
@@ -142,12 +144,13 @@ def main() -> int:
     s3_client = make_s3_client(args.skip_s3)
 
     if is_range:
-        log.info("Mode range: %s s/d %s (%d tanggal). Job master (tanpa @TargetDate) hanya dijalankan sekali.",
-                  date_list[0], date_list[-1], len(date_list))
+        log.info("Mode range: %s s/d %s (%d tanggal). Job master (tanpa @TargetDate) hanya dijalankan sekali; "
+                 "job mingguan/bulanan sekali per periode.", date_list[0], date_list[-1], len(date_list))
 
     log.info("Menghubungkan ke SQL Server...")
     ok, failed = 0, 0
     date_independent_done: set[str] = set()
+    periods_done: set[tuple[str, str]] = set()   # (job, awal periode) job periodik yang sudah sukses
     stop_all = False
     cadences = {r.name: r.effective_cadence for r in job_rows}
     executed = {}   # job -> (irama, {tanggal sukses}) -- bahan penilaian volume per periode
@@ -164,23 +167,31 @@ def main() -> int:
                 for job in jobs_today:
                     if is_range and not job.needs_date and job.name in date_independent_done:
                         continue
-                    date_suffix = d.strftime("%Y%m%d") if (is_range and job.needs_date) else None
+                    # Job periodik (bronze mingguan/bulanan) menarik SELURUH periode: sekali per periode, berlabel
+                    # awal periode (konsisten dengan run_store.plan_items). Gagal -> dicoba lagi di tanggal berikutnya.
+                    run_date = job.period[0] if job.period else date_str
+                    if job.period and (job.name, run_date) in periods_done:
+                        continue
+                    date_suffix = (run_date.replace("-", "") if job.period else d.strftime("%Y%m%d")) \
+                        if (is_range and job.needs_date) else None
                     try:
-                        audit = dq.prepare(db, job.name, date_str, cadences[job.name])
+                        audit = dq.prepare(db, job.name, run_date, cadences[job.name])
                         result = run_job(conn, job, args.batch, comp, s3_client, date_suffix, args.skip_local,
                                          audit)
                         dq.after_job(db, job, audit, result)
                         if result.s3_key:
                             mark_s3_uploaded(job.name, db)  # path S3 sudah dipakai -> dikunci di Web UI
                         ok += 1
-                        executed.setdefault(job.name, (cadences[job.name], set()))[1].add(date_str)
+                        executed.setdefault(job.name, (cadences[job.name], set()))[1].add(run_date)
                         if not job.needs_date:
                             date_independent_done.add(job.name)
+                        if job.period:
+                            periods_done.add((job.name, run_date))
                     except Exception as e:  # noqa: BLE001
                         failed += 1
                         if isinstance(e, dq.DQBlocked):
                             dq.after_job(db, job, audit, error=e)
-                        log.error("[%s] (%s) GAGAL: %s", job.name, date_str, e)
+                        log.error("[%s] (%s) GAGAL: %s", job.name, run_date, e)
                         if args.stop_on_error:
                             log.error("Berhenti karena --stop-on-error.")
                             stop_all = True

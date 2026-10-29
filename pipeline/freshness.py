@@ -16,7 +16,13 @@ sudah ada (ujung yang belum diproses = status 'late', tidak dilaporkan dua kali)
 mingguan, bulanan -- snapshot (master) tidak dicek. Dimulai dari tanggal tertua yang diketahui per job
 (dq_results atau S3) dan dibatasi jangkauan dq.gap_days / gap_weeks / gap_months. Hari 0 baris tidak membuat
 file di S3, jadi celah = belum ter-load ATAU memang kosong; run ulang tanggal itu menutupnya.
-Minggu = konvensi tabel minggu PZO (lihat pzo_week).
+Minggu = konvensi tabel minggu PZO (lihat periods.pzo_week).
+
+Job periodik (bronze mingguan/bulanan, job_templates.PERIOD_TEMPLATES): sekali run menarik SELURUH periode dan
+dilabeli awal periode, jadi satu hasil dihitung meliput hari-hari periode itu -- tapi hanya sampai SEHARI SEBELUM
+run itu terjadi (dq_results.created_at; untuk inventaris S3: last_modified file partisinya). Run di tengah periode
+belum bisa memuat hari-hari sesudahnya; tanpa batas ini, run Rabu yang tidak pernah disusul run lain membuat
+seluruh minggu terlihat lengkap padahal file di S3 hanya berisi Senin-Selasa (cover_periods).
 
 Penjaga harian (run_daily, dipanggil thread scheduler di worker): sekali per hari setelah jam cek
 (default 06:00 WIB), kirim email daftar job terlambat / ada celah. Default NONAKTIF -- aktifkan di Pengaturan
@@ -32,6 +38,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pipeline import notify
 from pipeline.app_settings import get_settings, set_settings
 from pipeline.job_store import JobRow, load_job_rows
+from pipeline.job_templates import period_kind
+from pipeline.periods import period_bounds, pzo_week, pzo_week_start  # noqa: F401 -- pzo_week_start dipakai s3_inventory
 from pipeline.scheduler import WIB
 
 GAP_CADENCES = ("daily", "weekly", "monthly")    # snapshot (master) tidak dicek celah
@@ -39,28 +47,6 @@ BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustu
          "November", "Desember"]
 _BLN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 _PROCESSED = "dq_status != 'blocked' AND (published = 1 OR rows = 0)"
-
-
-def pzo_week(d: date) -> tuple[int, int, int, date, date]:
-    """
-    Minggu kalender konvensi tabel minggu PZO (T_PZO_Week_Temp; cocok 100% untuk 2020-2028): Senin-Minggu,
-    minggu lintas bulan ikut bulan hari KAMIS-nya, N = urutan minggu di bulan itu.
-    Return (tahun, bulan, N, senin, minggu).
-    """
-    monday = d - timedelta(days=d.weekday())
-    thursday = monday + timedelta(days=3)
-    first = thursday.replace(day=1)
-    first_thursday = first + timedelta(days=(3 - first.weekday()) % 7)
-    return thursday.year, thursday.month, (thursday - first_thursday).days // 7 + 1, monday, monday + timedelta(days=6)
-
-
-def pzo_week_start(year: int, month: int, n: int) -> date:
-    """Kebalikan pzo_week: Senin minggu ke-N bulan itu. ValueError kalau bulan itu tidak punya minggu ke-N."""
-    first = date(year, month, 1)
-    monday = first + timedelta(days=(3 - first.weekday()) % 7 + 7 * (n - 1) - 3)
-    if n < 1 or pzo_week(monday)[:3] != (year, month, n):
-        raise ValueError(f"minggu ke-{n} {year}-{month:02d} tidak ada")
-    return monday
 
 
 def _fmt_range(a: date, b: date) -> str:
@@ -141,6 +127,27 @@ def expected_date(cadence: str, today: date) -> date:
     return today - timedelta(days=1)
 
 
+def run_day(timestamp: str) -> date:
+    """Timestamp ISO UTC (dq_results.created_at / s3_inventory.last_modified) -> tanggal kalender WIB-nya."""
+    return datetime.fromisoformat(timestamp).astimezone(WIB).date()
+
+
+def cover_periods(kind: str, results, today: date) -> set[date]:
+    """
+    Tanggal yang diliput hasil job periodik. results = [(tanggal hasil, tanggal run WIB)]. Tiap hasil meliput
+    periode (minggu / bulan) yang memuat tanggalnya, dipotong sampai SEHARI SEBELUM run itu terjadi (hari run sendiri
+    belum lengkap, sama seperti job harian mengolah H-1) dan tidak melewati kemarin. Run di tengah periode
+    meliput sebagian; sisanya tetap terlihat terlambat sampai ada run setelah periodenya selesai.
+    """
+    yesterday = today - timedelta(days=1)
+    covered: set[date] = set()
+    for d, ran_on in results:
+        start, end = period_bounds(kind, d)
+        last = min(end, ran_on - timedelta(days=1), yesterday)
+        covered.update(start + timedelta(days=i) for i in range((last - start).days + 1))
+    return covered
+
+
 def latest_processed(conn: sqlite3.Connection) -> dict[str, str]:
     """job -> tanggal terbaru yang sudah diproses (lihat docstring modul)."""
     return dict(conn.execute(f"SELECT job_name, MAX(target_date) FROM dq_results WHERE {_PROCESSED} "
@@ -165,6 +172,16 @@ def job_freshness(conn: sqlite3.Connection, rows: list[JobRow], today: date | No
         cadence = r.effective_cadence
         expected = expected_date(cadence, today)
         first, last = span.get(r.name, (None, None))
+        kind = period_kind(r.template)
+        if kind:   # job periodik: satu hasil meliput periodenya -- riwayat penuh, bukan hanya jangkauan `since`
+            results = [(date.fromisoformat(d), run_day(at)) for d, at in conn.execute(
+                f"SELECT target_date, created_at FROM dq_results WHERE job_name = ? AND {_PROCESSED} "
+                # last_modified boleh NULL di skema -> waktu pindai (selalu sesudah upload, jadi paling longgar)
+                "UNION SELECT target_date, COALESCE(last_modified, scanned_at) FROM s3_inventory WHERE job_name = ?",
+                (r.name, r.name))]
+            covered = cover_periods(kind, results, today)
+            done[r.name] = covered
+            first, last = (min(covered).isoformat(), max(covered).isoformat()) if covered else (None, None)
         if last is None:
             status, lag = "unknown", None
         else:

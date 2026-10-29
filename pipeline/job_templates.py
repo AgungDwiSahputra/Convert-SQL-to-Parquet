@@ -28,6 +28,7 @@ import pyarrow as pa
 
 from pipeline.config import S3_PREFIX
 from pipeline.job import Job
+from pipeline.periods import period_bounds, pzo_week
 
 # Nama file parquet default di S3. KONSTAN antar-run (bukan auto-increment/timestamp),
 # karena tiap job menulis data PENUH per partisi -- lihat README bagian 5 poin 3.
@@ -61,13 +62,39 @@ def s3_weekly(target_date: str, dataset: str, *, layer: str, module: str | None 
     query (batas minggu ditentukan SQL Server, jangan dihitung ulang di Python).
     """
     def build(first_row):
-        y = first_row["week_year"]
-        m = first_row["week_month"]
-        w = first_row["week_of_month"]
-        return _key(S3_PREFIX, layer, module, dataset,
-                    f"recorded_year={y}", f"recorded_month={m:02d}", f"recorded_week=W{w}",
-                    file_name)
+        return _week_key(first_row["week_year"], first_row["week_month"], first_row["week_of_month"],
+                         dataset, layer, module, file_name)
     return build
+
+
+def _week_key(year: int, month: int, week: int, dataset: str, layer: str, module: str | None,
+              file_name: str) -> str:
+    return _key(S3_PREFIX, layer, module, dataset,
+                f"recorded_year={year}", f"recorded_month={month:02d}", f"recorded_week=W{week}",
+                file_name)
+
+
+def s3_week_of(target_date: str, dataset: str, *, layer: str, module: str | None = None,
+               file_name: str = DEFAULT_PART_FILE):
+    """
+    Mingguan untuk tabel mentah (bronze_weekly): path SAMA dengan s3_weekly(), tapi minggunya dihitung dari
+    target_date dengan konvensi PZO (periods.pzo_week) karena tabel sumber tidak punya kolom week_*.
+    """
+    y, m, w, _monday, _sunday = pzo_week(_datetime.strptime(target_date, "%Y-%m-%d").date())
+    key = _week_key(y, m, w, dataset, layer, module, file_name)
+    return lambda _first_row: key
+
+
+def s3_monthly(target_date: str, dataset: str, *, layer: str, module: str | None = None,
+               file_name: str = DEFAULT_PART_FILE):
+    """
+    Bulanan untuk tabel mentah (bronze_monthly): {layer}/{module}/{dataset}/recorded_year=/recorded_month=/{file_name}.
+    Sengaja TIDAK masuk S3_LAYOUTS: tujuan S3 sp_job/custom_sql dijalankan per tanggal, sehingga tiap run
+    harian akan menimpa file satu bulan itu dengan datanya sendiri.
+    """
+    dt = _datetime.strptime(target_date, "%Y-%m-%d")
+    key = _key(S3_PREFIX, layer, module, dataset, f"recorded_year={dt:%Y}", f"recorded_month={dt:%m}", file_name)
+    return lambda _first_row: key
 
 
 # Baris pertama hasil query palsu -- untuk menghitung contoh path S3 layout mingguan (s3_weekly
@@ -291,6 +318,179 @@ def bronze_daily_join(name: str, target_date: str, *, table: str, alias: str, jo
                needs_date=True, count_query=count_query_for(query))
 
 
+# Template periodik: satu run menarik SELURUH periode (minggu Senin-Minggu / bulan kalender) yang memuat
+# target_date, ditulis ke SATU file partisi periode itu. Karena itu exporter.py & run_store.plan_items
+# menjalankannya sekali per periode, bukan sekali per tanggal (Job.period).
+PERIOD_TEMPLATES = {"bronze_weekly": "week", "bronze_monthly": "month",
+                    "bronze_monthly_ym": "month", "bronze_monthly_code": "month"}
+
+# Cara tabel menyimpan periode bulanan -- tiga template bulanan, SATU per CARA PENYIMPANAN (bukan per tipe kolom):
+#   bronze_monthly       satu kolom date/datetime  -> rentang tanggal
+#   bronze_monthly_ym    dua kolom tahun + bulan   -> kesetaraan tiap kolom
+#   bronze_monthly_code  satu kolom kode (YYYYMM)  -> kesetaraan satu nilai
+# Tipe kolom ANGKA vs TEKS ditangani di dalam template (parameter int, atau CAST(? AS VARCHAR) supaya index
+# kolom VARCHAR terpakai -- README bagian 9). Template tidak bisa bertanya ke SQL Server, jadi jenis kolom
+# disimpan eksplisit di args (year_type/month_type/code_type) dan divalidasi ulang terhadap katalog
+# (job_validation.py) -- pola yang sama dengan date_format di bronze_daily_strdate_eq.
+PERIOD_VALUE_TYPES = ("number", "text")
+
+# Format kode periode SATU kolom (strftime). Whitelist -- nilainya datang dari form web dan disisipkan sebagai
+# PARAMETER query (bukan teks SQL). Kolom ANGKA hanya boleh YYYYMM: format lain butuh nol di depan yang hilang.
+PERIODCODE_FORMATS = {
+    "%Y%m": "YYYYMM",
+    "%Y-%m": "YYYY-MM",
+    "%Y/%m": "YYYY/MM",
+    "%Y.%m": "YYYY.MM",
+    "%m%Y": "MMYYYY",
+    "%m-%Y": "MM-YYYY",
+    "%m/%Y": "MM/YYYY",
+    "%m.%Y": "MM.YYYY",
+}
+NUMERIC_PERIODCODE_FORMATS = ("%Y%m",)
+
+
+def period_kind(template: str) -> str | None:
+    """'week' | 'month' untuk template periodik, None untuk template lain."""
+    return PERIOD_TEMPLATES.get(template)
+
+
+def fixed_cadence(template: str) -> str | None:
+    """
+    Irama yang WAJIB untuk template periodik ('weekly' / 'monthly'); None = irama bebas. Pemantauan tidak bisa lebih
+    rinci dari cara data diambil: job bulanan berirama harian selalu terlihat terlambat dan masuk jadwal berirama
+    harian, bukan jadwal bulanannya. Arah sebaliknya sah (template harian berirama mingguan/bulanan: tabel bertanggal
+    harian yang datanya masuk seminggu/sebulan sekali), jadi template non-periodik tidak dibatasi.
+    """
+    return {"week": "weekly", "month": "monthly"}.get(period_kind(template))
+
+
+def _period_job(kind: str, name: str, target_date: str, *, query: str, params: list, date_check, dataset: str,
+                module: str | None, output: str | None, overrides: dict[str, str] | None,
+                labels: list[str] | None) -> Job:
+    """Job periodik: query & filter sudah disusun pemanggil, di sini S3 key, periode, dan DQ-nya."""
+    output = output or f"{name}.parquet"
+    start, end = period_bounds(kind, _datetime.strptime(target_date, "%Y-%m-%d").date())
+    s3_key = (s3_week_of if kind == "week" else s3_monthly)(target_date, dataset, layer="bronze", module=module,
+                                                            file_name=output)
+    return Job(name=name, query=query, params=params, output=output,
+               overrides=parse_overrides(overrides), labels=list(labels or []), s3_key=s3_key,
+               needs_date=True, count_query=count_query_for(query), date_check=date_check,
+               period=(start.isoformat(), end.isoformat()))
+
+
+def _bronze_period(kind: str, name: str, target_date: str, *, table: str, date_col: str, dataset: str, db: str,
+                   module: str | None, output: str | None, overrides: dict[str, str] | None,
+                   labels: list[str] | None) -> Job:
+    start, end = period_bounds(kind, _datetime.strptime(target_date, "%Y-%m-%d").date())
+    query = f"""
+            SET NOCOUNT ON;
+            SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)
+            WHERE {date_col} >= CAST(? AS DATE) AND {date_col} < DATEADD(DAY, 1, CAST(? AS DATE))
+        """
+    first = _datetime.combine(start, _datetime.min.time())
+    return _period_job(kind, name, target_date, query=query, params=[start.isoformat(), end.isoformat()],
+                       date_check={"column": date_col, "min": first,
+                                   "max_excl": _datetime.combine(end, _datetime.min.time()) + _timedelta(days=1)},
+                       dataset=dataset, module=module, output=output, overrides=overrides, labels=labels)
+
+
+def bronze_weekly(name: str, target_date: str, *, table: str, date_col: str, dataset: str, db: str,
+                  module: str | None = None, output: str | None = None,
+                  overrides: dict[str, str] | None = None, labels: list[str] | None = None) -> Job:
+    """
+    SELECT * mentah dari satu tabel, difilter SATU MINGGU penuh (Senin 00:00 s/d Senin berikutnya 00:00) yang
+    memuat target_date, lewat kolom tanggal datetime/date milik tabel itu. Satu file per minggu di
+    .../recorded_year=/recorded_month=/recorded_week=W{n}/ (minggu & bulan mengikuti konvensi PZO, lihat
+    pipeline/periods.py -- cocok dengan partisi s3_weekly dan inventaris S3).
+    """
+    return _bronze_period("week", name, target_date, table=table, date_col=date_col, dataset=dataset, db=db,
+                          module=module, output=output, overrides=overrides, labels=labels)
+
+
+def bronze_monthly(name: str, target_date: str, *, table: str, date_col: str, dataset: str, db: str,
+                   module: str | None = None, output: str | None = None,
+                   overrides: dict[str, str] | None = None, labels: list[str] | None = None) -> Job:
+    """
+    Sama seperti bronze_weekly(), tapi SATU BULAN kalender penuh yang memuat target_date. Satu file per bulan di
+    .../recorded_year=/recorded_month=/.
+    """
+    return _bronze_period("month", name, target_date, table=table, date_col=date_col, dataset=dataset, db=db,
+                          module=module, output=output, overrides=overrides, labels=labels)
+
+
+def _period_value(value: int | str, kind: str):
+    """Nilai parameter untuk satu kolom periode: int untuk kolom angka, teks untuk kolom teks."""
+    return int(value) if kind == "number" else str(value)
+
+
+def _period_predicate(col: str, kind: str) -> str:
+    """
+    Kesetaraan satu kolom periode. Kolom teks: CAST(? AS VARCHAR(32)) WAJIB -- pyodbc mengirim str Python sebagai
+    NVARCHAR, sehingga tanpa CAST seluruh kolom VARCHAR dikonversi dan index tidak terpakai (README bagian 9).
+    Identifier dalam kurung siku: nama kolom periode sering kata kunci T-SQL (year, month).
+    """
+    return f"[{col}] = ?" if kind == "number" else f"[{col}] = CAST(? AS VARCHAR(32))"
+
+
+def _check_period_types(**types: str) -> None:
+    for field, value in types.items():
+        if value not in PERIOD_VALUE_TYPES:
+            raise ValueError(f"{field} tidak didukung: {value!r} (pilihan: {', '.join(PERIOD_VALUE_TYPES)})")
+
+
+def bronze_monthly_ym(name: str, target_date: str, *, table: str, year_col: str, month_col: str, dataset: str,
+                      db: str, year_type: str = "number", month_type: str = "number", month_pad: bool = False,
+                      module: str | None = None, output: str | None = None,
+                      overrides: dict[str, str] | None = None, labels: list[str] | None = None) -> Job:
+    """
+    Sama seperti bronze_monthly(), tapi tabel menyimpan periode di DUA kolom -- tahun dan bulan (mis. tahun=2026,
+    bulan=10) -- bukan satu kolom tanggal. Filter = kesetaraan kedua kolom. Tiap kolom boleh ANGKA ('number':
+    int/smallint/bigint/...) atau TEKS ('text': varchar/nvarchar/char). Bulan teks ditulis 2 digit ('01') kalau
+    month_pad, selain itu apa adanya ('1'); tahun teks selalu 4 digit.
+    """
+    _check_period_types(year_type=year_type, month_type=month_type)
+    if year_col.lower() == month_col.lower():
+        raise ValueError("kolom tahun dan kolom bulan harus berbeda")
+    start, _end = period_bounds("month", _datetime.strptime(target_date, "%Y-%m-%d").date())
+    month_value = f"{start.month:02d}" if month_type == "text" and month_pad else start.month
+    query = f"""
+            SET NOCOUNT ON;
+            SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)
+            WHERE {_period_predicate(year_col, year_type)} AND {_period_predicate(month_col, month_type)}
+        """
+    return _period_job("month", name, target_date, query=query,
+                       params=[_period_value(start.year, year_type), _period_value(month_value, month_type)],
+                       date_check=[{"column": year_col, "equals": str(start.year)},
+                                   {"column": month_col, "equals": str(month_value)}],
+                       dataset=dataset, module=module, output=output, overrides=overrides, labels=labels)
+
+
+def bronze_monthly_code(name: str, target_date: str, *, table: str, code_col: str, dataset: str, db: str,
+                        code_type: str = "text", code_format: str = "%Y%m", module: str | None = None,
+                        output: str | None = None, overrides: dict[str, str] | None = None,
+                        labels: list[str] | None = None) -> Job:
+    """
+    Sama seperti bronze_monthly(), tapi tabel menyimpan periode di SATU kolom kode (mis. Periode = 202610 atau
+    '2026-10'). Filter = kesetaraan dengan kode periode bertarget, diformat sesuai code_format (PERIODCODE_FORMATS).
+    Kolom ANGKA ('number') hanya mendukung YYYYMM.
+    """
+    _check_period_types(code_type=code_type)
+    if code_format not in PERIODCODE_FORMATS:
+        raise ValueError(f"code_format tidak didukung: {code_format!r} (pilihan: {', '.join(PERIODCODE_FORMATS)})")
+    if code_type == "number" and code_format not in NUMERIC_PERIODCODE_FORMATS:
+        raise ValueError(f"kolom angka hanya mendukung format {', '.join(NUMERIC_PERIODCODE_FORMATS)}")
+    start, _end = period_bounds("month", _datetime.strptime(target_date, "%Y-%m-%d").date())
+    code = start.strftime(code_format)
+    query = f"""
+            SET NOCOUNT ON;
+            SELECT * FROM {db}.dbo.{table} WITH (NOLOCK, NOWAIT)
+            WHERE {_period_predicate(code_col, code_type)}
+        """
+    return _period_job("month", name, target_date, query=query, params=[_period_value(code, code_type)],
+                       date_check={"column": code_col, "equals": code},
+                       dataset=dataset, module=module, output=output, overrides=overrides, labels=labels)
+
+
 def bronze_master(name: str, target_date: str, *, table: str, dataset: str, db: str,
                   module: str | None = None, output: str | None = None,
                   s3_file_name: str | None = None,
@@ -396,6 +596,10 @@ TEMPLATES: dict[str, Callable[..., Job]] = {
     "bronze_daily_strdate_eq": bronze_daily_strdate_eq,
     "bronze_daily_epoch_ms": bronze_daily_epoch_ms,
     "bronze_daily_join": bronze_daily_join,
+    "bronze_weekly": bronze_weekly,
+    "bronze_monthly": bronze_monthly,
+    "bronze_monthly_ym": bronze_monthly_ym,
+    "bronze_monthly_code": bronze_monthly_code,
     "bronze_master": bronze_master,
     "bronze_arcsde_view": bronze_arcsde_view,
     "sp_job": sp_job,
@@ -406,7 +610,8 @@ TEMPLATES: dict[str, Callable[..., Job]] = {
 def s3_target_info(template: str, args: dict) -> dict | None:
     """Ringkasan tujuan S3 sebuah job (layout/layer/module/dataset) untuk ditampilkan di Web UI."""
     if template.startswith("bronze_"):
-        layout = "daily" if template.startswith("bronze_daily") else "master"
+        layout = ("weekly" if template == "bronze_weekly" else "monthly" if template.startswith("bronze_monthly")
+                  else "daily" if template.startswith("bronze_daily") else "master")
         return {"layout": layout, "layer": "bronze", "module": args.get("module"), "dataset": args.get("dataset")}
     spec = args.get("s3")
     if not spec:
@@ -420,10 +625,10 @@ CADENCES = ("daily", "weekly", "monthly", "snapshot")
 
 
 def default_cadence(template: str, args: dict) -> str:
-    """Tebakan irama dari layout S3 (harian/mingguan/master); job tanpa S3 dari needs_date."""
+    """Tebakan irama dari layout S3 (harian/mingguan/bulanan/master); job tanpa S3 dari needs_date."""
     info = s3_target_info(template, args)
     if info:
-        return {"daily": "daily", "weekly": "weekly", "master": "snapshot"}.get(info["layout"], "daily")
+        return {"daily": "daily", "weekly": "weekly", "monthly": "monthly", "master": "snapshot"}.get(info["layout"], "daily")
     return "daily" if args.get("needs_date", True) else "snapshot"
 
 

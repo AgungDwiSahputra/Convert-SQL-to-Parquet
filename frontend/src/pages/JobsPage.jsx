@@ -91,6 +91,7 @@ export default function JobsPage() {
             <option value="all">Semua tipe</option>
             <option value="daily">Harian</option>
             <option value="weekly">Mingguan</option>
+            <option value="monthly">Bulanan</option>
             <option value="master">Master</option>
           </select>
         </div>

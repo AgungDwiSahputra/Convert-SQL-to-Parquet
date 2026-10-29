@@ -21,7 +21,8 @@ import pyodbc
 from pipeline.config import CONN_STR
 from pipeline.export import advance_to_resultset_with_columns, build_schema, rows_to_table
 from pipeline.job import Job
-from pipeline.job_templates import STRDATE_FORMATS
+from pipeline.job_templates import NUMERIC_PERIODCODE_FORMATS, PERIODCODE_FORMATS, STRDATE_FORMATS
+from pipeline.job_validation import NUMERIC_TYPES, STRING_TYPES
 
 _CACHE_TTL_S = 120
 _LOGIN_TIMEOUT_S = 15
@@ -217,6 +218,67 @@ def _parses(s: str, fmt: str) -> bool:
         return False
 
 
+def period_value_type(data_type: str) -> str | None:
+    """'number' | 'text' untuk tipe kolom yang bisa dipakai sebagai kolom periode bulanan; None kalau tidak bisa."""
+    return "number" if data_type in NUMERIC_TYPES else "text" if data_type in STRING_TYPES else None
+
+
+def detect_period_column(values: list, data_type: str, role: str) -> dict:
+    """
+    Tebak cara memfilter kolom periode bulanan dari contoh nilainya. role: 'year' (tahun 4 digit), 'month'
+    (bulan 1-12), atau 'code' (satu kolom kode seperti 202610 / '2026-10').
+    -> {"ok", "value_type": 'number'|'text', "month_pad": bool|None, "code_format": str|None, "message"}.
+    Sama seperti detect_date_format(): cukup MAYORITAS contoh (>= 75%) yang cocok -- nilai kotor sebagian kecil
+    baris ('' atau 1900 di tabel yang ada) tidak boleh menggagalkan deteksi; yang tidak cocok tidak ikut terfilter.
+    Contohnya nilai DISTINCT (bukan per baris), jadi noise yang beragam terlihat lebih besar dari porsinya di data:
+    kolom bulan dengan 1-12 plus -1, 15, 17, 20 ... (Gold_Master_AWM) hanya 63% distinct padahal hampir semua barisnya
+    valid. Domain bulan cuma 12 nilai, jadi untuk bulan cukup 50% (kolom bilangan kecil lain seperti hari 1-31 atau
+    minggu 1-53 tetap jatuh di bawahnya).
+    """
+    vtype = period_value_type(data_type)
+    bad = lambda msg: {"ok": False, "value_type": vtype, "month_pad": None, "code_format": None, "message": msg}  # noqa: E731
+    if vtype is None:
+        return bad(f"Tipe {data_type} tidak didukung sebagai kolom periode (angka atau teks saja).")
+    strs = [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
+    if not strs:
+        return bad("Kolom kosong — format tidak bisa dicek.")
+    shown = ", ".join(strs[:4])
+
+    def good(matches: int, ok_msg: str, min_ratio: float = 0.75, **extra) -> dict | None:
+        if matches / len(strs) < min_ratio:
+            return None
+        odd = len(strs) - matches
+        note = f" ({odd} dari {len(strs)} contoh di luar format — tidak ikut terfilter)" if odd else ""
+        return {"ok": True, "value_type": vtype, "month_pad": None, "code_format": None, "message": ok_msg + note, **extra}
+
+    if role == "year":
+        ok = sum(bool(re.fullmatch(r"\d{4}", s)) and 1900 <= int(s) <= 2100 for s in strs)
+        return good(ok, f"Tahun 4 digit ({'angka' if vtype == 'number' else 'teks'}). Contoh: {shown}") or \
+            bad(f"Isi kolom tidak terlihat seperti tahun 4 digit (contoh: {shown}).")
+    if role == "month":
+        months = [s for s in strs if re.fullmatch(r"\d{1,2}", s) and 1 <= int(s) <= 12]
+        not_month = bad(f"Isi kolom tidak terlihat seperti bulan 1–12 (contoh: {shown}).")
+        if vtype == "number":
+            return good(len(months), f"Bulan angka 1–12. Contoh: {shown}", min_ratio=0.5) or not_month
+        # Teks: '1' atau '01'? Hanya bulan 1-9 yang membedakan -- contoh tanpa bulan itu tidak memberi bukti.
+        low = [s for s in months if int(s) < 10]
+        padded, plain = sum(len(s) == 2 for s in low), sum(len(s) == 1 for s in low)
+        pad = padded >= plain if low else True
+        how = ("ditulis 2 digit ('01')" if pad else "ditulis tanpa nol ('1')") if low else \
+            "bentuk bulan 1–9 belum terlihat di contoh — dipilih 2 digit ('01'), periksa lewat uji coba"
+        mixed = " Ada campuran '1' dan '01' — hanya yang sesuai pilihan yang terfilter." if padded and plain else ""
+        return good(len(months), f"Bulan teks, {how}. Contoh: {shown}.{mixed}", min_ratio=0.5, month_pad=pad) or not_month
+    # role == 'code'
+    if vtype == "number":
+        strs = [str(int(float(s))) if re.fullmatch(r"\d+(\.0+)?", s) else s for s in strs]   # 202610.0 -> 202610
+    formats = NUMERIC_PERIODCODE_FORMATS if vtype == "number" else tuple(PERIODCODE_FORMATS)
+    for fmt in formats:
+        found = good(sum(_parses(s, fmt) for s in strs), f"Format {PERIODCODE_FORMATS[fmt]}. Contoh: {shown}", code_format=fmt)
+        if found:
+            return found
+    return bad(f"Format kode periode tidak dikenali (contoh: {shown}) — tidak bisa difilter per bulan.")
+
+
 def _jsonable(v):
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
@@ -325,6 +387,36 @@ def test_run(job: Job, limit: int = 100) -> dict:
                 "sample": [[_jsonable(v) for v in r] for r in rows[:20]],
                 "message": None,
             }
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+    finally:
+        _test_slots.release()
+
+
+def count_rows(job: Job) -> dict:
+    """
+    Total baris yang akan diekspor job untuk tanggal ini, TANPA batas baris -- memakai query hitung data quality
+    (job.count_query: filter & parameter IDENTIK dengan ekspor). Uji coba hanya menarik maks TEST_MAX_ROWS baris,
+    jadi tidak bisa memberi tahu jumlah sebenarnya (mis. ±7.100 baris sebulan T_HMS_Produksi).
+    Pengaman sama dengan test_run: berbagi slot uji coba (maks 2 bersamaan), timeout TEST_TIMEOUT_S, transaksi
+    SELALU di-ROLLBACK. Di tabel besar tanpa index, COUNT bisa memindai seluruh tabel -> bisa kena timeout.
+    """
+    if not job.count_query:
+        raise ValueError("Template ini tidak punya query hitung (SP / SQL bebas / ArcSDE).")
+    if not _test_slots.acquire(blocking=False):
+        raise TestRunBusy("Sedang ada 2 uji coba lain berjalan — coba lagi sebentar.")
+    try:
+        conn = _connect()
+        conn.timeout = TEST_TIMEOUT_S
+        started = time.monotonic()
+        try:
+            cur = conn.cursor()
+            cur.execute(job.count_query, job.params) if job.params else cur.execute(job.count_query)
+            total = int(cur.fetchone()[0])
+            return {"total": total, "elapsed_s": round(time.monotonic() - started, 2)}
         finally:
             try:
                 conn.rollback()

@@ -6,10 +6,11 @@ Kenapa perlu: dq_results hanya berisi run yang dicatat pipeline ini (sejak fitur
 dari CLI dengan jobs.db lain tidak tercatat -- tanpa inventaris, riwayat job "dimulai" dari catatan pertamanya
 sehingga celah sebelum tanggal itu tidak terlihat.
 
-Cara kerja: untuk tiap job AKTIF berirama harian/mingguan/bulanan dengan layout S3 harian/mingguan, folder
+Cara kerja: untuk tiap job AKTIF berirama harian/mingguan/bulanan dengan layout S3 harian/mingguan/bulanan, folder
 datasetnya di-list (ListObjectsV2, 1 request per 1.000 objek) dan tanggal partisinya dicatat di tabel
 s3_inventory (diganti penuh per job tiap pindai). Partisi mingguan (recorded_week=W{n}, nilai dari SQL Server)
-dicatat sebagai 7 hari minggu itu menurut konvensi minggu PZO (freshness.pzo_week). Master (snapshot_date=)
+dicatat sebagai 7 hari minggu itu menurut konvensi minggu PZO (periods.pzo_week); partisi bulanan
+(recorded_month=MM tanpa partisi di bawahnya) sebagai seluruh hari bulan itu. Master (snapshot_date=)
 tidak dipindai: foldernya digeser maju oleh pipeline/snapshots.py, bukan riwayat per tanggal.
 
 Batasan: hari 0 baris tidak membuat file di S3 (export.run_job hanya upload kalau ada baris), jadi tanggal yang
@@ -28,15 +29,17 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from pipeline.app_settings import get_settings, set_settings
 from pipeline.config import S3_BUCKET_NAME
-from pipeline.freshness import GAP_CADENCES, pzo_week_start
+from pipeline.freshness import GAP_CADENCES
 from pipeline.job_store import JobRow, load_job_rows, utc_now, write_tx
 from pipeline.job_templates import s3_list_prefix, s3_target_info
+from pipeline.periods import period_bounds, pzo_week_start
 from pipeline.scheduler import WIB
 
-LAYOUTS = ("daily", "weekly")
+LAYOUTS = ("daily", "weekly", "monthly")
 _PATTERNS = {
     "daily": re.compile(r"^recorded_year=(\d{4})/recorded_month=(\d{1,2})/recorded_day=(\d{1,2})/[^/]+\.parquet$"),
     "weekly": re.compile(r"^recorded_year=(\d{4})/recorded_month=(\d{1,2})/recorded_week=W(\d{1,2})/[^/]+\.parquet$"),
+    "monthly": re.compile(r"^recorded_year=(\d{4})/recorded_month=(\d{1,2})/[^/]+\.parquet$"),
 }
 # Error S3 yang membuat SEMUA job pasti gagal -- pindai dihentikan. Pesan sendiri, BUKAN pesan asli AWS
 # (pesan asli memuat ARN user IAM, nomor akun, dan nama bucket).
@@ -54,11 +57,14 @@ def partition_dates(layout: str, rel_key: str) -> list[date]:
     m = _PATTERNS[layout].match(rel_key)
     if not m:
         return []
-    y, mo, n = (int(x) for x in m.groups())
+    y, mo, *n = (int(x) for x in m.groups())
     try:
         if layout == "daily":
-            return [date(y, mo, n)]
-        monday = pzo_week_start(y, mo, n)
+            return [date(y, mo, n[0])]
+        if layout == "monthly":
+            start, end = period_bounds("month", date(y, mo, 1))
+            return [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        monday = pzo_week_start(y, mo, n[0])
     except ValueError:
         return []
     return [monday + timedelta(days=i) for i in range(7)]
