@@ -140,7 +140,7 @@ function LoadChart({ daily, dataDate }) {
     <Card className="overflow-hidden">
       <CardHeader
         icon={BarChart3}
-        title="Data ter-load per tanggal"
+        title="Data masuk datalake per tanggal"
         description={`Baris yang sudah diproses per tanggal data · 14 hari · total ${fmtNumber(total)} baris`}
       />
       <div className="px-4 pb-4 pt-5 sm:px-5">
@@ -223,7 +223,7 @@ function LoadChart({ daily, dataDate }) {
         </p>
       </div>
       <table className="sr-only">
-        <caption>Data ter-load per tanggal, 14 hari</caption>
+        <caption>Data masuk datalake per tanggal, 14 hari</caption>
         <thead><tr><th>Tanggal</th><th>Baris</th><th>Job diproses</th><th>Ditahan DQ</th></tr></thead>
         <tbody>{daily.map((d) => <tr key={d.date}><td>{d.date}</td><td>{d.rows}</td><td>{d.jobs}</td><td>{d.blocked}</td></tr>)}</tbody>
       </table>
@@ -320,9 +320,9 @@ export default function DashboardPage() {
 
   const urgent = items.filter((i) => i.severity !== 'info').length
   const level = items.some((i) => i.severity === 'critical') ? 'critical' : urgent ? 'warning' : 'ok'
-  const bannerTitle = level === 'ok' ? 'Semua data sudah masuk & sehat' : `${urgent} hal perlu perhatian`
+  const bannerTitle = level === 'ok' ? 'Datalake terkini & sehat' : `${urgent} hal perlu perhatian`
   const bannerText = level === 'ok'
-    ? `Data ${dataDate ? fmtDate(dataDate) : 'terbaru'} sudah diproses ${fresh.length} dari ${active.length} job aktif, tanpa run gagal atau data ditahan dalam 7 hari.`
+    ? `Data ${dataDate ? fmtDate(dataDate) : 'terbaru'} sudah masuk datalake untuk ${fresh.length} dari ${active.length} job aktif, tanpa run gagal atau data ditahan dalam 7 hari.`
     : 'Lihat daftar "Perlu perhatian" di bawah — mulai dari yang bertanda merah.'
 
   return (
@@ -331,6 +331,7 @@ export default function DashboardPage() {
         <div>
           <p className="text-sm text-gray-500">{todayLabel}</p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-gray-800">{greeting()}, {firstName}</h1>
+          <p className="mt-1 text-sm text-gray-500">Ringkasan kondisi datalake — kesegaran, kualitas, dan pemuatan data terbaru.</p>
         </div>
         {isOperator && <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan Run</Button>}
       </div>
@@ -403,7 +404,7 @@ export default function DashboardPage() {
             <CardHeader
               icon={History}
               title="Run terbaru"
-              description="Ekspor yang dijalankan lewat Web UI & jadwal"
+              description="Pemuatan data ke datalake lewat Web UI & jadwal"
               action={<Link to="/runs" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Lihat semua</Link>}
             />
             {runs.length === 0 ? (
@@ -460,7 +461,7 @@ export default function DashboardPage() {
             <div className="space-y-2 p-4">
               {isOperator && <QuickAction icon={Play} title="Jalankan run" desc="Pilih job & tanggal, cek preview" onClick={() => navigate('/runs/new')} />}
               {isOperator && <QuickAction icon={Plus} title="Tambah job" desc="Wizard dari tabel SQL Server" onClick={() => navigate('/jobs/new')} />}
-              <QuickAction icon={Database} title="Daftar job" desc={`${fmtNumber(jobs.length)} job · kesegaran & celah data`} onClick={() => navigate('/jobs')} />
+              <QuickAction icon={Database} title="Daftar job" desc={`${fmtNumber(jobs.length)} job · konfigurasi, kesegaran & celah`} onClick={() => navigate('/jobs')} />
               <QuickAction icon={Server} title="Riwayat run" desc="Status, log, dan hasil data quality" onClick={() => navigate('/runs')} />
             </div>
           </Card>

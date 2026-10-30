@@ -1,7 +1,8 @@
 # SQL Server → Parquet → S3
 
 Pipeline satu arah untuk mengekspor data SQL Server 2012 ke file Parquet dan mengunggahnya ke AWS S3,
-lengkap dengan Web UI untuk mengelola dan menjalankan ekspor. Dokumen ini ditulis supaya manusia
+lengkap dengan Web UI **Monitoring Data — Datalake & Configuration Visibility Dashboard** untuk memantau
+isi datalake beserta konfigurasinya, serta mengelola dan menjalankan ekspor. Dokumen ini ditulis supaya manusia
 maupun AI bisa paham alur, batasan, dan aturan modifikasi tanpa membaca seluruh kode. Referensi kode
 ditulis `file.py:fungsi()`, bukan nomor baris.
 
@@ -334,6 +335,10 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
                    portal SSO               logs/runs/run_<id>.log ──▶ log live di UI
 ```
 
+- **Nama tampilan**: "Monitoring Data" + tagline "Datalake & Configuration Visibility" (sidebar
+  `components/Layout.jsx`, `pages/LoginPage.jsx`, `<title>` `frontend/index.html`, judul FastAPI di
+  `webapp/main.py`). Identitas operasional sengaja tetap bernama Parquet Exporter: prefix subjek email
+  `[Parquet Exporter]` (§10), nama container/image/service (§11) — mengubahnya merusak filter email & perintah deploy.
 - **Login** lewat portal SSO → session aplikasi sendiri (cookie HttpOnly, token disimpan sebagai
   hash). Dari profil SSO hanya nama & email yang disimpan. Batas 5× gagal / 10 menit per (IP, username).
   - Akun SSO yang **belum terdaftar** otomatis dibuat sebagai `viewer` (`created_by = sso-auto`) selama

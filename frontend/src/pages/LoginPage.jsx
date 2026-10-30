@@ -1,14 +1,14 @@
 import { useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router'
-import { Activity, Eye, EyeOff, LogIn, ShieldCheck, Wand2 } from 'lucide-react'
+import { Activity, Eye, EyeOff, LogIn, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 import { Alert, Button, Field, inputClass } from '../components/ui'
 import { BrandMark } from '../components/Layout'
 import { useAuth } from '../lib/auth'
 
 const FEATURES = [
-  [Wand2, 'Tambah job dari tabel SQL Server', 'Wizard memilih template & format tanggal otomatis — tanpa menulis kode.'],
-  [Activity, 'Jalankan & pantau dari browser', 'Log live, riwayat lengkap, ulangi yang gagal dengan sekali klik.'],
-  [ShieldCheck, 'Aman untuk data produksi', 'Uji coba selalu di-rollback, path S3 yang sudah dipakai terkunci.'],
+  [Activity, 'Kesegaran & kelengkapan data', 'Dataset yang terlambat, celah periode, dan hasil data quality langsung terlihat.'],
+  [SlidersHorizontal, 'Konfigurasi yang transparan', 'Tabel sumber, template, irama, jadwal, dan path S3 tiap dataset — lengkap dengan riwayat perubahannya.'],
+  [ShieldCheck, 'Aman untuk data produksi', 'Data quality menahan upload bermasalah, uji coba selalu di-rollback, path S3 yang sudah dipakai terkunci.'],
 ]
 
 export default function LoginPage() {
@@ -47,17 +47,18 @@ export default function LoginPage() {
         <div className="relative flex items-center gap-3">
           <BrandMark className="h-10 w-10" />
           <div className="leading-tight">
-            <p className="font-semibold text-white">Parquet Exporter</p>
-            <p className="text-xs text-brand-200/80">SQL Server → Parquet → S3</p>
+            <p className="font-semibold text-white">Monitoring Data</p>
+            <p className="text-xs text-brand-200/80">Datalake &amp; Configuration Visibility Dashboard</p>
           </div>
         </div>
 
         <div className="relative max-w-md">
           <h2 className="text-3xl font-semibold leading-tight tracking-tight text-white">
-            Ekspor data ke datalake, cukup dari browser.
+            Kondisi datalake dan konfigurasinya, dalam satu layar.
           </h2>
           <p className="mt-3 text-sm leading-relaxed text-brand-100/80">
-            Data monitoring air perkebunan dari SQL Server disalin ke Parquet dan S3 — siap untuk analitik dan AI/ML.
+            Pantau kesegaran, kelengkapan, dan kualitas data monitoring air perkebunan di datalake S3 — beserta job,
+            jadwal, dan path yang mengisinya.
           </p>
           <ul className="mt-10 space-y-6">
             {FEATURES.map(([Icon, title, desc]) => (
@@ -81,10 +82,10 @@ export default function LoginPage() {
       <main className="flex flex-1 items-center justify-center px-4 py-12 sm:px-6">
         <div className="w-full max-w-sm">
           <div className="mb-8 flex items-center gap-3 lg:hidden">
-            <img src="/favicon.svg" alt="" className="h-10 w-10" />
+            <img src="favicon.svg" alt="" className="h-10 w-10" />
             <div className="leading-tight">
-              <p className="font-semibold text-gray-800">Parquet Exporter</p>
-              <p className="text-xs text-gray-500">SQL Server → Parquet → S3</p>
+              <p className="font-semibold text-gray-800">Monitoring Data</p>
+              <p className="text-xs text-gray-500">Datalake &amp; Configuration Visibility</p>
             </div>
           </div>
 

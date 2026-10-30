@@ -51,7 +51,7 @@ async def lifespan(_app: FastAPI):
 
 API = f"{BASE_PATH}/api"
 
-app = FastAPI(title="Parquet Exporter", lifespan=lifespan,
+app = FastAPI(title="Monitoring Data - Datalake & Configuration Visibility", lifespan=lifespan,
               docs_url=f"{API}/docs", redoc_url=None, openapi_url=f"{API}/openapi.json")
 
 app.include_router(routes_auth.router, prefix=f"{API}/auth", tags=["auth"])

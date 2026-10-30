@@ -33,8 +33,8 @@ function Brand() {
     <Link to="/" className="flex items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
       <BrandMark />
       <div className="leading-tight">
-        <p className="text-sm font-semibold text-white">Parquet Exporter</p>
-        <p className="text-xs text-brand-200/80">SQL Server → S3</p>
+        <p className="text-sm font-semibold text-white">Monitoring Data</p>
+        <p className="text-xs text-brand-200/80">Datalake &amp; Configuration Visibility</p>
       </div>
     </Link>
   )
