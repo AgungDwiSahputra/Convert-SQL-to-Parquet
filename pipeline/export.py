@@ -30,7 +30,8 @@ import pyarrow.parquet as pq
 
 from pipeline import dq, snapshots
 from pipeline.config import (
-    AWS_ACCESS_KEY_ID, AWS_REGION, AWS_SECRET_ACCESS_KEY, LOG_DIR, OUTPUT_DIR, S3_BUCKET_NAME,
+    AWS_ACCESS_KEY_ID, AWS_PROFILE, AWS_REGION, AWS_SECRET_ACCESS_KEY, LOG_DIR, OUTPUT_DIR, S3_BUCKET_NAME,
+    S3_CONFIGURED,
 )
 
 
@@ -126,18 +127,25 @@ class JobResult:
 
 
 def make_s3_client(skip_s3: bool):
-    """Klien boto3 S3, atau None kalau skip_s3 / kredensial .env belum lengkap (upload dilewati)."""
+    """
+    Klien boto3 S3, atau None kalau skip_s3 / kredensial .env belum lengkap (upload dilewati).
+    Access key kalau diisi; kalau tidak, profile AWS_PROFILE (IAM role) -- kredensial sementaranya
+    diperbarui otomatis oleh botocore, jadi run panjang tidak putus saat sesi role habis.
+    """
     if skip_s3:
         return None
-    if not (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and S3_BUCKET_NAME):
-        log.warning("Kredensial S3 belum lengkap di .env, upload S3 dilewati untuk semua job.")
+    if not S3_CONFIGURED:
+        log.warning("Kredensial S3 belum lengkap di .env (access key atau AWS_PROFILE, plus S3_BUCKET_NAME), "
+                    "upload S3 dilewati untuk semua job.")
         return None
-    return boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION,
-    )
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+        return boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+        )
+    return boto3.Session(profile_name=AWS_PROFILE, region_name=AWS_REGION).client("s3")
 
 
 def rows_to_table(rows: list, schema: pa.Schema, ingested_at: datetime | None = None) -> pa.Table:

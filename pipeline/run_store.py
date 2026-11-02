@@ -19,7 +19,8 @@ import os
 import socket
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from pipeline.config import RUN_LOG_DIR
 from pipeline.job_store import JobRow, build_jobs, connect, utc_now, write_tx
@@ -178,10 +179,81 @@ def _run_dict(row: sqlite3.Row) -> dict:
     return d
 
 
-def list_runs(conn: sqlite3.Connection, limit: int = 50, before_id: int | None = None) -> list[dict]:
-    rows = conn.execute(_RUN_SUMMARY_SQL + " WHERE (? IS NULL OR r.id < ?) GROUP BY r.id ORDER BY r.id DESC LIMIT ?",
-                        (before_id, before_id, limit)).fetchall()
+@dataclass(frozen=True)
+class RunFilter:
+    """Filter halaman Riwayat Run. Field kosong = tidak memfilter."""
+    statuses: tuple[str, ...] = ()
+    source: str | None = None        # 'manual' | 'schedule' (run jadwal = created_by 'jadwal:<nama>')
+    created_by: str | None = None
+    q: str | None = None             # potongan nama job di dalam run, atau nomor run ("123" / "#123")
+    date_from: date | None = None    # rentang tanggal DATA run beririsan dengan [date_from, date_to]
+    date_to: date | None = None
+    created_from: date | None = None  # tanggal run DIBUAT (kalender WIB), inklusif -- bukan tanggal datanya
+    created_to: date | None = None
+
+
+# Kalender WIB dikunci eksplisit (bukan timezone OS server), sama seperti job_store/scheduler.
+_WIB = ZoneInfo("Asia/Jakarta")
+
+
+def _wib_midnight_utc(day: date) -> str:
+    """Awal hari `day` menurut WIB, dalam format string UTC yang sama dengan runs.created_at (utc_now)."""
+    return datetime.combine(day, time.min, _WIB).astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _filter_sql(f: RunFilter) -> tuple[str, list]:
+    where, params = [], []
+    if f.statuses:
+        where.append(f"r.status IN ({','.join('?' * len(f.statuses))})")
+        params += f.statuses
+    if f.source == "schedule":
+        where.append("r.created_by LIKE 'jadwal:%'")
+    elif f.source == "manual":
+        where.append("r.created_by NOT LIKE 'jadwal:%'")
+    if f.created_by:
+        where.append("r.created_by = ?")
+        params.append(f.created_by)
+    q = (f.q or "").strip()
+    if q:
+        num = q.removeprefix("#")
+        # instr, bukan LIKE: '_' di nama job (bronze_xxx) bukan wildcard.
+        where.append("(r.id = ? OR EXISTS (SELECT 1 FROM run_items j WHERE j.run_id = r.id "
+                     "AND instr(lower(j.job_name), lower(?)) > 0))")
+        params += [int(num) if num.isascii() and num.isdigit() and len(num) <= 18 else None, q]
+    if f.date_from:
+        where.append("r.end_date >= ?")
+        params.append(f.date_from.isoformat())
+    if f.date_to:
+        where.append("r.start_date <= ?")
+        params.append(f.date_to.isoformat())
+    # created_at = UTC; hari WIB [00:00, 24:00) -> batas UTC (WIB = UTC+7, tanpa DST). Perbandingan string ISO seragam.
+    if f.created_from:
+        where.append("r.created_at >= ?")
+        params.append(_wib_midnight_utc(f.created_from))
+    if f.created_to:
+        where.append("r.created_at < ?")
+        params.append(_wib_midnight_utc(f.created_to + timedelta(days=1)))
+    return " AND ".join(where) or "1", params
+
+
+def list_runs(conn: sqlite3.Connection, limit: int = 50, before_id: int | None = None,
+              filt: RunFilter = RunFilter(), offset: int = 0) -> list[dict]:
+    where, params = _filter_sql(filt)
+    rows = conn.execute(_RUN_SUMMARY_SQL + f" WHERE (? IS NULL OR r.id < ?) AND {where} "
+                        "GROUP BY r.id ORDER BY r.id DESC LIMIT ? OFFSET ?",
+                        (before_id, before_id, *params, limit, offset)).fetchall()
     return [_run_dict(r) for r in rows]
+
+
+def count_runs(conn: sqlite3.Connection, filt: RunFilter = RunFilter()) -> int:
+    where, params = _filter_sql(filt)
+    return conn.execute(f"SELECT COUNT(*) FROM runs r WHERE {where}", params).fetchone()[0]
+
+
+def run_creators(conn: sqlite3.Connection) -> list[dict]:
+    """Pembuat run yang pernah ada (user & 'jadwal:<nama>') + jumlah run -- pilihan filter di UI."""
+    return [dict(r) for r in conn.execute(
+        "SELECT created_by, COUNT(*) AS runs FROM runs GROUP BY created_by ORDER BY created_by")]
 
 
 def get_run(conn: sqlite3.Connection, run_id: int) -> dict | None:

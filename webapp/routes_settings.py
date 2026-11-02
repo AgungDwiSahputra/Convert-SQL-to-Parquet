@@ -114,7 +114,7 @@ def save_auth(body: AuthIn, admin: dict = Depends(require_role("admin")), db: sq
 @router.post("/s3-inventory/scan")
 def scan_s3_inventory(admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
     """Pindai inventaris S3 sekarang (hanya membaca S3; beberapa detik untuk puluhan job)."""
-    return s3_inventory.scan(db, make_s3_client(False), by=admin["username"])
+    return s3_inventory.scan(db, lambda: make_s3_client(False), by=admin["username"])
 
 
 @router.post("/test-email")

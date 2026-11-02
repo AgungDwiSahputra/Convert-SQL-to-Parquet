@@ -47,10 +47,16 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(PROJECT_DIR, "output"))  
 JOBS_DB = os.environ.get("JOBS_DB", os.path.join(PROJECT_DIR, "jobs.db"))
 
 # --- Upload ke S3 (opsional per job, lihat kunci S3 job di job_templates.py) ---
+# Kredensial: access key (IAM user), ATAU AWS_PROFILE = profile di AWS_CONFIG_FILE yang meng-assume IAM role
+# dengan kredensial instance EC2 (deploy Docker di server, README §11). Access key dipakai kalau dua-duanya diisi.
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+AWS_PROFILE = os.environ.get("AWS_PROFILE", "").strip()
+if not AWS_PROFILE:
+    os.environ.pop("AWS_PROFILE", None)   # `AWS_PROFILE=` kosong di .env membuat boto3 gagal (ProfileNotFound '')
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+S3_CONFIGURED = bool(S3_BUCKET_NAME and ((AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) or AWS_PROFILE))
 # Segmen paling luar S3 key, DI ATAS layer. "" = bronze/silver/gold langsung di root
 # bucket. Mengubahnya memindahkan path SEMUA job -- jangan diubah tanpa alasan kuat.
 S3_PREFIX = os.environ.get("S3_PREFIX", "")

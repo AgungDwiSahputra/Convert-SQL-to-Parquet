@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from pipeline import run_store
-from pipeline.config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BATCH_SIZE, COMPRESSION, S3_BUCKET_NAME
+from pipeline.config import BATCH_SIZE, COMPRESSION, S3_CONFIGURED
 from pipeline.job_store import default_target_date, load_job_rows
 from webapp.deps import current_user, get_db, require_role
 
@@ -20,6 +20,7 @@ MAX_RANGE_DAYS = 366
 MAX_ITEMS = 5000
 PREVIEW_ITEMS = 1000
 FINAL_STATUSES = ("success", "failed", "cancelled", "interrupted")
+RUN_STATUSES = ("queued", "running") + FINAL_STATUSES
 
 
 class RunOptionsIn(BaseModel):
@@ -38,7 +39,7 @@ class RunIn(BaseModel):
 
 
 def _s3_enabled() -> bool:
-    return bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and S3_BUCKET_NAME)
+    return S3_CONFIGURED
 
 
 def _plan(body: RunIn, db: sqlite3.Connection) -> tuple[list[run_store.PlannedItem], list[str]]:
@@ -104,10 +105,28 @@ def create_run(body: RunIn, user: dict = Depends(require_role("operator")), db: 
     return {"id": run_id}
 
 
+@router.get("/creators")
+def creators(_user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    return {"creators": run_store.run_creators(db)}
+
+
 @router.get("")
-def list_runs(limit: int = Query(50, ge=1, le=200), before_id: int | None = None,
+def list_runs(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), before_id: int | None = None,
+              run_status: str | None = Query(None, alias="status", description="Dipisah koma, mis. failed,interrupted"),
+              source: Literal["manual", "schedule"] | None = None,
+              created_by: str | None = Query(None, max_length=200),
+              q: str | None = Query(None, max_length=200),
+              date_from: date | None = Query(None, description="Tanggal DATA run (beririsan dengan rentang)"),
+              date_to: date | None = None,
+              created_from: date | None = Query(None, description="Tanggal run dibuat, kalender WIB"),
+              created_to: date | None = None,
               _user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    return {"runs": run_store.list_runs(db, limit, before_id)}
+    statuses = tuple(s for s in (run_status or "").split(",") if s)
+    unknown = sorted(set(statuses) - set(RUN_STATUSES))
+    if unknown:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Status tidak dikenal: {', '.join(unknown)}")
+    filt = run_store.RunFilter(statuses, source, created_by, q, date_from, date_to, created_from, created_to)
+    return {"runs": run_store.list_runs(db, limit, before_id, filt, offset), "total": run_store.count_runs(db, filt)}
 
 
 def _get_run_or_404(db: sqlite3.Connection, run_id: int) -> dict:

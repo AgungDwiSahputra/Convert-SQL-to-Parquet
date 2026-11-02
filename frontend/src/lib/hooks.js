@@ -12,20 +12,27 @@ export function useApi(path, { refreshMs = null } = {}) {
   const [loading, setLoading] = useState(!!path)
   const refreshRef = useRef(refreshMs)
   refreshRef.current = refreshMs
+  const pathRef = useRef(path)
+  pathRef.current = path
 
   const load = useCallback(async () => {
     if (!path) return null
+    let result = null
+    let err = null
     try {
-      const result = await api(path)
+      result = await api(path)
+    } catch (e) {
+      err = e
+    }
+    // path berganti selagi menunggu (mis. filter diubah cepat): hasil basi dibuang, jangan timpa yang baru.
+    if (pathRef.current !== path) return null
+    if (err) setError(err)
+    else {
       setData(result)
       setError(null)
-      return result
-    } catch (e) {
-      setError(e)
-      return null
-    } finally {
-      setLoading(false)
     }
+    setLoading(false)
+    return result
   }, [path])
 
   useEffect(() => {

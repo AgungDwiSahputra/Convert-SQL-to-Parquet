@@ -227,7 +227,8 @@ gold): folder baru hanya dibuat kalau data **berubah**, dideteksi dengan hash SH
   error kalau tidak ada satu pun yang cocok.
 - Satu koneksi SQL Server untuk seluruh run. Job yang gagal dicatat lalu lanjut ke job berikutnya,
   kecuali `--stop-on-error`.
-- Kredensial S3 di `.env` belum lengkap → upload dilewati dengan peringatan, bukan error.
+- Kredensial S3 di `.env` belum lengkap (access key atau `AWS_PROFILE`, plus `S3_BUCKET_NAME`) → upload
+  dilewati dengan peringatan, bukan error.
 - Mode range: job harian dijalankan sekali per tanggal (file lokal diberi sufiks `_YYYYMMDD`), job
   master sekali saja, job periodik (mingguan/bulanan) sekali per periode yang tersentuh range, berlabel
   **awal periode** (Senin / tanggal 1) — label itu juga yang tercatat di `dq_results`. Periode yang gagal
@@ -595,9 +596,10 @@ PC dev memakai susunan yang sama: repo boleh di folder mana pun, tapi `.env` lok
 6. Verifikasi dari PC lain (di Windows Server 2016 port container biasanya tidak bisa dibuka lewat
    `localhost` server itu sendiri): `http://<server>:8084/api/health` harus `worker_online: true` —
    bukti kedua container berbagi `jobs.db`. Lalu jalankan satu run uji dengan toggle **Upload ke S3**
-   dimatikan. Buka port 8084 di firewall/Security Group bila perlu. Pastikan akun AWS di `.env` punya izin
-   `s3:DeleteObject` untuk prefix master (snapshot master berbasis perubahan, §5) dan `s3:ListBucket`
-   (inventaris S3, §10).
+   dimatikan. Buka port 8084 di firewall/Security Group bila perlu. Pastikan kredensial AWS (access key
+   atau IAM role, subbagian berikut) punya izin `s3:DeleteObject` untuk prefix master (snapshot master
+   berbasis perubahan, §5) dan `s3:ListBucket` (inventaris S3, §10). Bucket di akun lain = izin juga harus
+   ada di bucket policy; tanpa itu hapus snapshot gagal `AccessDenied` (hanya peringatan di log run).
 7. Matikan instance lama dan task `run_exporter.bat` yang tumpang tindih (§10).
 
 **Update versi**: `git pull` → `docker build` (dengan `HOSTS_ENTRIES` yang sama) →
@@ -613,6 +615,42 @@ docker logs --tail 100 parquet-exporter-worker
 
 Log, output lokal, dan backup harian ada di folder data host `D:\APLIKASI\monitoring-datas\Databases`
 (`logs\`, `output\`, `backups\`).
+
+### Kredensial AWS lewat IAM role (tanpa access key)
+
+Di server EC2, aplikasi bisa memakai **instance role** server lalu meng-assume role aplikasi di akun
+datalake. Tidak ada access key di `.env`, dan kredensial sementaranya diperbarui otomatis oleh botocore
+(`make_s3_client`, `pipeline/export.py`). Polanya sama dengan aplikasi Docker lain di server yang sama:
+
+1. Buat folder di luar repo, misalnya `D:\APLIKASI\monitoring-datas\aws\config`. Isinya spesifik environment
+   (ARN role), jadi jangan dimasukkan ke Git:
+   ```ini
+   [profile monitoring-datas]
+   role_arn = arn:aws:iam::<akun-datalake>:role/<role-aplikasi>
+   credential_source = Ec2InstanceMetadata
+   role_session_name = monitoring-datas
+   region = ap-southeast-1
+   ```
+   Trust policy role aplikasi harus mengizinkan instance role server (`sts:AssumeRole`).
+2. Di `.env`, hapus `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (access key selalu menang kalau terisi),
+   lalu isi:
+   ```
+   AWS_CONFIG_FILE=C:/aws/config
+   AWS_PROFILE=monitoring-datas
+   AWS_EC2_METADATA_SERVICE_ENDPOINT=http://<ip host jaringan nat>:<port proxy metadata>
+   AWS_METADATA_SERVICE_TIMEOUT=5
+   AWS_METADATA_SERVICE_NUM_ATTEMPTS=3
+   ```
+   Container Windows di jaringan `nat` tidak menjangkau `169.254.169.254` secara langsung. Karena itu server
+   menyediakan proxy metadata di IP host jaringan `nat`. Tanyakan IP dan port-nya ke pengelola server, dan
+   jangan menulis IP-nya ke file Git.
+3. Tambahkan `-v "D:\APLIKASI\monitoring-datas\aws:C:\aws:ro"` ke **kedua** `docker run` (web & worker).
+4. Verifikasi: `check_network.py` ikut mengecek endpoint metadata dan STS. Identitas yang dipakai dapat dicek
+   dengan `docker exec <container-worker> python -c "import boto3; print(boto3.client('sts').get_caller_identity()['Arn'])"`.
+   Hasilnya harus `assumed-role/<role-aplikasi>/monitoring-datas`.
+
+Di PC dev tetap pakai access key. Profile hasil `aws login` butuh paket `botocore[crt]`, yang tidak ada di
+`requirements.txt` (boto3 menolak dengan `MissingDependencyException`).
 
 ### Di belakang gateway (satu port publik untuk semua aplikasi Docker)
 

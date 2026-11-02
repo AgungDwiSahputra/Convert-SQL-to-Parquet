@@ -106,7 +106,7 @@ def accept_schema(db: sqlite3.Connection, job: str) -> int:
 
 def scan_s3(db: sqlite3.Connection) -> int:
     from pipeline.export import make_s3_client   # impor berat (pyodbc/pyarrow) hanya untuk perintah ini
-    r = s3_inventory.scan(db, make_s3_client(False), by="manage.py")
+    r = s3_inventory.scan(db, lambda: make_s3_client(False), by="manage.py")
     print(f"Inventaris S3: {r['jobs']} dari {r['targets']} job dipindai, {r['dates']} tanggal tercatat.")
     for e in r["errors"]:
         print(f"  {e['job_name']}: {e['error']}")

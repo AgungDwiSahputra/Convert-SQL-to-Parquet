@@ -44,11 +44,19 @@ _PATTERNS = {
 # Error S3 yang membuat SEMUA job pasti gagal -- pindai dihentikan. Pesan sendiri, BUKAN pesan asli AWS
 # (pesan asli memuat ARN user IAM, nomor akun, dan nama bucket).
 _FATAL = {
-    "AccessDenied": "Akses ditolak S3: akun AWS di .env perlu izin s3:ListBucket pada bucket/prefix data.",
-    "AllAccessDisabled": "Akses ditolak S3: akun AWS di .env perlu izin s3:ListBucket pada bucket/prefix data.",
+    "AccessDenied": "Akses ditolak AWS: kredensial aplikasi (access key / IAM role) perlu izin s3:ListBucket "
+                    "pada bucket/prefix data; mode IAM role juga perlu izin assume role.",
+    "AllAccessDisabled": "Akses ditolak S3: kredensial aplikasi (access key / IAM role) perlu izin s3:ListBucket "
+                         "pada bucket/prefix data.",
     "InvalidAccessKeyId": "Kunci akses AWS di .env tidak dikenal.",
     "SignatureDoesNotMatch": "Kunci rahasia AWS di .env tidak cocok.",
     "NoSuchBucket": "Bucket S3 di .env tidak ditemukan.",
+    # Mode IAM role (AWS_PROFILE): biasanya sudah gagal saat klien dibuat (kredensial dasar dari metadata EC2).
+    "CredentialRetrievalError": "Kredensial IAM role gagal diambil: cek AWS_CONFIG_FILE, AWS_PROFILE, dan "
+                                "AWS_EC2_METADATA_SERVICE_ENDPOINT.",
+    "NoCredentialsError": "Kredensial IAM role gagal diambil: cek AWS_CONFIG_FILE, AWS_PROFILE, dan "
+                          "AWS_EC2_METADATA_SERVICE_ENDPOINT.",
+    "ProfileNotFound": "Profile AWS_PROFILE tidak ada di AWS_CONFIG_FILE.",
 }
 
 
@@ -97,16 +105,23 @@ def _error_code(e: Exception) -> str:
     return (getattr(e, "response", None) or {}).get("Error", {}).get("Code") or type(e).__name__
 
 
-def scan(conn: sqlite3.Connection, s3, rows: list[JobRow] | None = None, by: str = "worker") -> dict:
+def scan(conn: sqlite3.Connection, s3_factory, rows: list[JobRow] | None = None, by: str = "worker") -> dict:
     """
     Pindai S3 untuk job aktif (atau `rows`) dan ganti isi s3_inventory per job yang berhasil. Return ringkasan
     {at, by, jobs, dates, errors[{job_name, error}], error} -- juga disimpan di settings s3inv.last_result.
+    `s3_factory()` -> klien S3 atau None; dipanggil di sini supaya kredensial yang gagal didapat (IAM role)
+    tercatat sebagai pesan, bukan exception.
     """
     rows = load_job_rows() if rows is None else rows
     targets = [(r, t) for r in rows if (t := scan_target(r))]
     result = {"at": utc_now(), "by": by, "jobs": 0, "targets": len(targets), "dates": 0, "errors": [], "error": None}
+    try:
+        s3 = s3_factory()
+    except Exception as e:  # noqa: BLE001
+        s3, code = None, _error_code(e)
+        result["error"] = _FATAL.get(code, f"Klien S3 gagal dibuat ({code}).")
     if s3 is None:
-        result["error"] = "Kredensial S3 belum lengkap di .env server."
+        result["error"] = result["error"] or "Kredensial S3 belum lengkap di .env server."
         targets = []
     for row, (layout, prefix) in targets:
         try:
@@ -141,5 +156,5 @@ def run_daily(conn: sqlite3.Connection, s3_factory, now: datetime | None = None)
     if now.time() < time(hh, mm) or s["s3inv.last_date"] == now.date().isoformat():
         return None
     set_settings(conn, {"s3inv.last_date": now.date().isoformat()}, "worker")  # tandai dulu: gagal pun tidak diulang
-    return scan(conn, s3_factory(), by="worker")
+    return scan(conn, s3_factory, by="worker")
 

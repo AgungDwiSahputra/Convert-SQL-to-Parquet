@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { ArrowLeft, Ban, Check, Copy, RotateCcw, Terminal } from 'lucide-react'
 import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
@@ -143,6 +143,9 @@ const ITEM_FILTERS = [
 export default function RunDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  // Dari Riwayat Run yang sedang difilter -> kembali ke daftar dengan filter yang sama.
+  const backTo = location.state?.back || '/runs'
   const { user } = useAuth()
   const { data: run, error, loading, reload } = useApi(`/runs/${id}`, {
     refreshMs: (r) => (r && !FINAL_STATUSES.includes(r.status) ? 2500 : null),
@@ -170,7 +173,7 @@ export default function RunDetailPage() {
     return (
       <div className="space-y-4">
         <Alert tone="error">{error.message}</Alert>
-        <Link to="/runs" className="text-sm font-medium text-brand-600 hover:underline">← Kembali ke riwayat</Link>
+        <Link to={backTo} className="text-sm font-medium text-brand-600 hover:underline">← Kembali ke riwayat</Link>
       </div>
     )
   }
@@ -190,7 +193,7 @@ export default function RunDetailPage() {
         await reload()
       } else {
         const r = await api(`/runs/${run.id}/retry`, { method: 'POST' })
-        navigate(`/runs/${r.id}`)
+        navigate(`/runs/${r.id}`, { state: location.state })
       }
       setConfirm(null)
     } catch (e) {
@@ -203,7 +206,7 @@ export default function RunDetailPage() {
   return (
     <div className="space-y-6">
       <div>
-        <Link to="/runs" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800">
+        <Link to={backTo} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800">
           <ArrowLeft className="h-4 w-4" aria-hidden /> Riwayat Run
         </Link>
         <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -211,7 +214,7 @@ export default function RunDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight text-gray-800">Run #{run.id}</h1>
             <StatusBadge status={run.status} />
             {run.retry_of && (
-              <Link to={`/runs/${run.retry_of}`} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-brand-600">
+              <Link to={`/runs/${run.retry_of}`} state={location.state} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-brand-600">
                 <RotateCcw className="h-3.5 w-3.5" aria-hidden /> ulangan dari #{run.retry_of}
               </Link>
             )}
