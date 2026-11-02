@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from pipeline import run_store
-from pipeline.config import BATCH_SIZE, COMPRESSION, S3_CONFIGURED
+from pipeline.config import BATCH_SIZE, COMPRESSION, S3_BUCKET_NAME, S3_CONFIGURED
 from pipeline.job_store import default_target_date, load_job_rows
 from webapp.deps import current_user, get_db, require_role
 
