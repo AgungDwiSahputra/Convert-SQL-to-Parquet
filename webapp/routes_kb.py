@@ -1,9 +1,9 @@
 """
 Knowledge Base (PRD v1.1 Fase 10): target KB Bedrock yang dipantau + riwayat ingestion-nya.
 
-Semua pembacaan AWS di sini hanya get/list (cepat, beberapa detik). Memulai ingestion TIDAK ada di route ini:
-untuk KB dokumen, job Glue sudah memicunya (pipeline/kb_sync.py). Viewer boleh melihat; muat ulang riwayat =
-operator; mendaftarkan/mengubah/menghapus target = admin.
+Semua pembacaan AWS di sini hanya get/list (cepat, beberapa detik). Proses manual (Cleansing Glue / Sync KB) hanya
+DIANTRIKAN di sini -- worker yang memeriksa syarat dengan data AWS terbaru lalu memulainya (pipeline/kb_actions.py). Viewer boleh
+melihat; muat ulang riwayat & proses manual = operator; mendaftarkan/mengubah/menghapus target = admin.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from pipeline import aws, kb_sync
+from pipeline import aws, kb_actions, kb_sync, run_store
 from pipeline.app_settings import get_settings
 from webapp.deps import current_user, get_db, require_role
 
@@ -32,6 +32,10 @@ class TargetIn(BaseModel):
     pipeline: str = "manual"
     dataset: str | None = Field(None, max_length=80)
     notes: str | None = Field(None, max_length=500)
+
+
+class ActionIn(BaseModel):
+    action: str = Field(max_length=20)
 
 
 class TargetPatch(BaseModel):
@@ -80,7 +84,21 @@ def detail(target_id: int, _user: dict = Depends(current_user), db: sqlite3.Conn
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Target tidak ditemukan.")
     return {"target": kb_sync.target_view(db, row), "ingestions": kb_sync.list_ingestions(db, target_id, 50),
-            "monitor": _monitor(db)}
+            "monitor": _monitor(db), "actions": kb_actions.list_actions(db, target_id, 10),
+            "availability": kb_actions.availability(db, row, run_store.worker_online(db))}
+
+
+@router.post("/{target_id}/actions")
+def request_action(target_id: int, body: ActionIn, user: dict = Depends(require_role("operator")),
+                   db: sqlite3.Connection = Depends(get_db)):
+    """Antrikan proses manual (glue_run / ingestion). Worker memeriksa ulang syarat dengan data AWS terbaru sebelum memulai."""
+    try:
+        action = kb_actions.request(db, target_id, body.action, user["username"], run_store.worker_online(db))
+    except kb_actions.ActionError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT if e.conflict else status.HTTP_400_BAD_REQUEST, str(e)) from e
+    row = kb_sync.get_target(db, target_id)
+    return {"action": action, "actions": kb_actions.list_actions(db, target_id, 10),
+            "availability": kb_actions.availability(db, row, run_store.worker_online(db))}
 
 
 @router.post("")

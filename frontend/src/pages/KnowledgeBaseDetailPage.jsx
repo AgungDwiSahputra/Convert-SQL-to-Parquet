@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { ArrowLeft, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowLeft, Pencil, Play, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateTime, fmtDuration, fmtNumber, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, Modal, PageHeader, Switch, inputClass } from '../components/ui'
-import { IngestionBadge, KbHealthBadge, PIPELINE_LABEL, StageBadge, originInfo } from '../components/kb'
+import { ActionStatusBadge, IngestionBadge, KbHealthBadge, PIPELINE_LABEL, StageBadge, originInfo } from '../components/kb'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -158,13 +158,118 @@ function FlowCard({ flow, raw }) {
   )
 }
 
+const ACTION_INFO = {
+  glue_run: {
+    title: 'Cleansing Glue',
+    desc: 'Menjalankan job Glue dataset ini sekarang. Glue memulai ingestion Knowledge Base sendiri di akhir run bila ada dokumen berubah.',
+    button: 'Jalankan cleansing',
+    icon: Play,
+    confirm: (t, job) => `Job ${job} akan dijalankan sekarang. Run tanpa dokumen berubah selesai dalam hitungan menit; dokumen baru diproses model vision (berbiaya) dan run WM bisa berjalan berjam-jam. Lanjutkan?`,
+  },
+  ingestion: {
+    title: 'Sync Knowledge Base',
+    desc: 'Memulai ingestion Bedrock langsung (tanpa cleansing). Untuk saat Glue tidak memicu sync, atau Knowledge Base tanpa jalur Glue.',
+    button: 'Sync sekarang',
+    icon: RefreshCw,
+    confirm: (t) => (t.pipeline === 'documents'
+      ? 'Bedrock akan mengindeks perubahan di data source ini (inkremental). Glue tidak mengetahui sync ini, jadi di akhir run berikutnya Glue mungkin memulai satu ingestion lagi. Lanjutkan?'
+      : 'Bedrock akan mengindeks perubahan di data source ini (inkremental). Lanjutkan?'),
+  },
+}
+
+function ManualActionsCard({ target, flow, availability, actions, canRun, onRequested }) {
+  const [pending, setPending] = useState(null) // aksi yang sedang dikonfirmasi
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const order = ['glue_run', 'ingestion'].filter((a) => availability?.[a])
+  const job = flow?.schedule?.glue_job
+
+  const send = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api(`/kb/${target.id}/actions`, { method: 'POST', body: { action: pending } })
+      setPending(null)
+      onRequested()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader title="Proses manual" description="Diantrikan ke worker; syarat diperiksa ulang dengan data AWS terbaru sebelum dimulai" />
+      <ul className="divide-y divide-gray-100">
+        {order.map((a) => {
+          const info = ACTION_INFO[a]
+          const av = availability[a]
+          return (
+            <li key={a} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-800">{info.title}</p>
+                <p className="mt-0.5 text-xs text-gray-500">{info.desc}</p>
+                {!av.enabled && av.reason && <p className="mt-1 text-xs text-amber-700">{av.reason}</p>}
+              </div>
+              {canRun && (
+                <Button size="sm" variant="secondary" icon={info.icon} disabled={!av.enabled} onClick={() => { setError(null); setPending(a) }}>
+                  {info.button}
+                </Button>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {!canRun && <p className="border-t border-gray-100 px-5 py-2.5 text-xs text-gray-400">Hanya Operator dan Admin yang bisa menjalankan proses manual.</p>}
+      {actions.length > 0 && (
+        <div className="border-t border-gray-100 px-5 py-3">
+          <p className="mb-2 text-xs font-medium text-gray-500">Riwayat proses manual</p>
+          <ul className="space-y-2">
+            {actions.map((x) => (
+              <li key={x.id} className="flex items-start justify-between gap-3 text-xs">
+                <div className="min-w-0">
+                  <p className="text-gray-700">
+                    <span className="font-medium">{x.label}</span> · {x.requested_by} · <span title={fmtDateTime(x.requested_at)}>{fmtRelative(x.requested_at)}</span>
+                  </p>
+                  {x.message && <p className="break-words text-gray-500">{x.message}</p>}
+                </div>
+                <ActionStatusBadge status={x.status} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <Modal
+        open={!!pending}
+        onClose={() => setPending(null)}
+        size="md"
+        title={pending ? ACTION_INFO[pending].title : ''}
+        description={target.title || target.name}
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setPending(null)}>Batal</Button>
+            <Button loading={busy} onClick={send}>{pending ? ACTION_INFO[pending].button : ''}</Button>
+          </>
+        )}
+      >
+        {pending && <p className="text-sm text-gray-600">{ACTION_INFO[pending].confirm(target, job)}</p>}
+        <p className="mt-3 text-xs text-gray-500">Worker memulai dalam ±20 detik setelah memeriksa ulang syarat; hasilnya tampil di riwayat di bawah.</p>
+        {error && <div className="mt-3"><Alert tone="error">{error}</Alert></div>}
+      </Modal>
+    </Card>
+  )
+}
+
 export default function KnowledgeBaseDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
   const isAdmin = hasRole(user, 'admin')
   const isOperator = hasRole(user, 'operator')
-  const { data, error, loading, reload } = useApi(`/kb/${id}`, { refreshMs: (d) => (d?.target?.running ? 15000 : 60000) })
+  const { data, error, loading, reload } = useApi(`/kb/${id}`, {
+    refreshMs: (d) => (d?.actions?.some((a) => a.status === 'queued' || a.status === 'running') ? 5000 : d?.target?.running || d?.target?.flow?.glue?.status === 'running' ? 15000 : 60000),
+  })
   const [refreshing, setRefreshing] = useState(false)
   const [message, setMessage] = useState(null)
   const [editing, setEditing] = useState(false)
@@ -245,6 +350,10 @@ export default function KnowledgeBaseDetailPage() {
         </Card>
 
         {t.flow && <FlowCard flow={t.flow} raw={data.monitor?.raw} />}
+
+        {data.availability && (
+          <ManualActionsCard target={t} flow={t.flow} availability={data.availability} actions={data.actions || []} canRun={isOperator} onRequested={reload} />
+        )}
 
         <Card className="overflow-hidden">
           <CardHeader title="Riwayat ingestion" description="50 terbaru, termasuk yang dimulai job Glue atau console AWS" />

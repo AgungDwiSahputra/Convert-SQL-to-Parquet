@@ -728,13 +728,14 @@ laporan run (`reports/`) dan state (`state/`) → **job Glue yang sama memulai i
 (`state/glue/ingestion/<dataset>.json` memuat `job_id`-nya). KB `few-shot-sql` (`few_shots/kb/`) tidak lewat jalur ini
 (ingestion manual).
 
-**Yang dikerjakan aplikasi** — hanya MEMBACA AWS; **tidak memulai ingestion** (pemicu kedua berisiko ditolak Bedrock atau
-memboroskan biaya embedding; sync manual menyusul sebagai irisan terpisah):
+**Yang dikerjakan aplikasi** — pemantauan hanya MEMBACA AWS dan **tidak pernah memulai ingestion otomatis** (Glue sudah
+memicunya; pemicu kedua berisiko ditolak Bedrock atau memboroskan biaya embedding). Memulai proses hanya lewat tombol
+**Proses manual** oleh operator (di bawah):
 - *Target* (`kb_targets`): pasangan Knowledge Base ID + Data Source ID yang didaftarkan admin (divalidasi ke Bedrock lewat
   `GetKnowledgeBase`/`GetDataSource`; prefix S3 sumber dibaca dari konfigurasi data source). Nama bucket tidak pernah dikirim ke UI.
 - *Riwayat* (`kb_ingestions`): cermin `ListIngestionJobs` (30 terbaru per target) — termasuk ingestion yang dimulai job Glue
   atau console. Alasan gagal dari `GetIngestionJob`. `origin`: `external` (default), `glue` (+ `glue_scheduled`) lewat atribusi di bawah,
-  `app` disiapkan untuk sync manual.
+  `app` = dimulai tombol Sync manual (dikenali dari description berawalan `Monitoring Data:`, juga bila riwayat lokal hilang).
 - *Siklus worker* (`kb_sync.run_cycle`, di thread scheduler): jeda `kb.poll_idle_seconds` (300) atau `kb.poll_active_seconds` (45)
   bila ada ingestion berjalan. Sinkron PERTAMA target tidak mengirim email (riwayat lama bukan kejadian baru). Ingestion `FAILED`
   atau `COMPLETE` dengan dokumen gagal → satu email ringkasan (`notify.notify_kb_ingestions`, saklar `notify.on_kb`).
@@ -751,11 +752,12 @@ memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/che
 
 **Izin IAM** yang dipakai (policy `svc-kpn-ai-policy` v5): `bedrock:GetKnowledgeBase`, `GetDataSource`, `ListDataSources`,
 `ListIngestionJobs`, `GetIngestionJob`, `StartIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen);
-`glue:GetJobRuns` dan `glue:GetJobs` (status run Glue; endpoint `glue.<region>.amazonaws.com` ikut dicek `check_network.py`). `bedrock:ListKnowledgeBases` ditambahkan v5 pada resource `knowledge-base/*` dan terbukti berfungsi di GIS04 (uji 3 Nov 2026;
+`glue:GetJobRuns` dan `glue:GetJobs` (status run Glue; endpoint `glue.<region>.amazonaws.com` ikut dicek `check_network.py`);
+`glue:StartJobRun` (tombol Cleansing Glue, `job/*`). `bedrock:ListKnowledgeBases` ditambahkan v5 pada resource `knowledge-base/*` dan terbukti berfungsi di GIS04 (uji 3 Nov 2026;
 dugaan awal bahwa aksi List butuh `"Resource": "*"` ternyata keliru); form pendaftaran tetap memakai Knowledge Base ID yang diketik. Membaca isi `reports/` &
 `state/` jalur dokumen butuh `s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy v5).
 
-**Akses**: viewer melihat; operator memuat ulang riwayat; admin mendaftarkan/mengubah/menghapus target dan mengatur
+**Akses**: viewer melihat; operator memuat ulang riwayat dan menjalankan proses manual; admin mendaftarkan/mengubah/menghapus target dan mengatur
 pemantauan (Pengaturan → AWS & Knowledge Base). API: `/api/kb` (`routes_kb.py`). Pesan error AWS ke UI = pesan sendiri per kode
 error (`aws.error_message`), bukan pesan asli AWS (memuat ARN role, nomor akun, nama bucket).
 
@@ -765,7 +767,7 @@ itu. Di PC dev, profile `monitoring-datas` di `.env` menunjuk `AWS_CONFIG_FILE=C
 1. **PC dev** — logika & bentuk API Bedrock: uji dengan klien palsu, atau identitas dev (`aws login --profile <profile dev>`, lalu
    `AWS_PROFILE=<profile dev>` hanya untuk proses uji; butuh `botocore[crt]`). Izin identitas dev berbeda dari role server.
 2. **GIS04** — izin role sesungguhnya: `check_network.py`, Pengaturan → Uji koneksi AWS, lalu daftarkan Knowledge Base (semua panggilan
-   read-only). Backup `jobs.db` sebelum deploy (migrasi v12 otomatis).
+   read-only). Backup `jobs.db` sebelum deploy (migrasi skema otomatis saat web/worker start; Fase 10 = v12–v15).
 
 **Kesegaran tiga tahap** (`pipeline/kb_pipeline.py`, untuk target berjalur `documents`; S3 `LIST` tanpa `GetObject`, plus status run Glue lewat
 `glue:GetJobRuns`). Fakta hasil LIST/Glue API disimpan di `kb_pipeline_status`; statusnya dihitung saat dibaca (`glue_state`, `kb_state` = fungsi murni dari waktu):
@@ -795,5 +797,34 @@ itu. Di PC dev, profile `monitoring-datas` di `.env` menunjuk `AWS_CONFIG_FILE=C
   dokumen) dijalankan dari sistem ini (PRD Fase 6/7); status dibaca langsung dari JobRun dan tebakan jam itu tidak diperlukan lagi. Penilaian
   "ingestion tertunda" tetap berlaku.
 
-**Belum dikerjakan** (PRD v1.1): sync manual (`StartIngestionJob`, lewat antrian worker; izin sudah ada di policy v5), ringkasan isi laporan
-Glue + atribusi pasti via `job_id` (butuh `s3:GetObject` pada `reports/` dan `state/` — belum ada di policy v5), integrasi ke Beranda.
+**Proses manual** (`pipeline/kb_actions.py`, tabel `kb_actions`, kartu "Proses manual" di halaman detail target; operator/admin).
+Web hanya MENGANTRIKAN (`POST /api/kb/{id}/actions`, duplikat yang masih menunggu = 409); worker (`kb_actions.process`, thread scheduler
+±20 dtk, SEBELUM siklus pemantauan) memeriksa ULANG syarat dengan data AWS terbaru (`evaluate_guards`, hanya baca) lalu memulai. Tombol
+nonaktif + alasan dihitung dari fakta tersimpan (`availability`) — hanya prakiraan; keputusan akhir di worker.
+
+| Tombol | Panggilan AWS | Syarat (ditolak bila tidak terpenuhi) |
+|---|---|---|
+| **Cleansing Glue** (target berjalur `documents`) | `glue:StartJobRun` job dataset (argumen default) — Glue sendiri memulai ingestion di akhir run bila ada dokumen berubah | tidak ada run Glue aktif (status run tak terbaca = ditolak); tidak ada ingestion aktif di KB (kalau ada, run Glue berhenti `ingestion_busy` tanpa memproses) |
+| **Sync Knowledge Base** (semua target) | `bedrock:StartIngestionJob` LANGSUNG ke data source target, description `Monitoring Data: sync manual oleh <user>` | target `documents`: 1) tidak ada run Glue aktif, 2) tidak ada `state/glue/journal.json` (publikasi Glue belum tuntas → hasil setengah jadi ikut terindeks), 3) tidak ada ingestion aktif di data source MANA PUN pada KB itu, 4) tidak dalam `kb.manual_block_minutes` (30) sebelum `kb.glue_run_time` (ingestion yang masih jalan saat Glue mulai membuat run terjadwal berhenti). Target lain (mis. `few-shot-sql`): hanya syarat 3 |
+
+- Syarat Sync KB meniru koordinator job Glue (`prep/glue_sync.coordinate`: "All writers and sync triggers for these KBs must use this
+  coordinator") — jangan dilonggarkan. `--sync-only` milik job Glue sengaja TIDAK dipakai (menolak selama ada file `state/glue/tasks/`).
+  Efek samping yang diketahui: Glue tidak tahu sync manual, jadi di akhir run berikutnya bisa memulai satu ingestion lagi (inkremental, murah).
+- Status permintaan: `queued` → `running` (klaim atomik) → `started` (+ `external_id` = ingestion job ID / JobRunId) / `rejected` (syarat,
+  atau AWS `ConflictException`/`ConcurrentRunsExceededException`) / `failed` (error teknis, pesan `aws.error_message`). Antrian > 10 menit
+  dibatalkan (tidak "tiba-tiba jalan" lama kemudian); baris `running` > 30 menit (worker berhenti di tengah proses) → `failed` dengan pesan
+  minta cek riwayat dulu (AWS mungkin sudah menerima panggilannya).
+- Setelah dimulai: riwayat ingestion langsung mendapat baris asal `app` + `started_by`, siklus pemantauan dipercepat (jeda aktif).
+- Cek ingestion aktif = `ListIngestionJobs` **satu status per panggilan** (STARTING / IN_PROGRESS / STOPPING). Filter `STATUS EQ` berisi
+  beberapa nilai sekaligus mengembalikan daftar KOSONG walau ada ingestion IN_PROGRESS (terbukti ke Bedrock asli 3 Nov 2026, KB wm) —
+  jangan digabung. Kode Glue (`prep/sync.py`, `prep/glue_sync.py`) memakai filter 3 nilai itu, jadi cek "ingestion aktif" di sisi Glue
+  kemungkinan tidak pernah terpicu (sudah dilaporkan ke pemilik job Glue; aplikasi tidak bergantung padanya).
+- Status run Glue memilih run AKTIF lebih dulu (`latest_glue_run`): trigger terjadwal yang terbentur `MaxConcurrentRuns=1` saat run manual
+  masih berjalan tidak menyamarkan run itu.
+- **Menguji**: klien palsu + `JOBS_DB` salinan. Uji ke AWS asli hanya `evaluate_guards`/`availability` dengan klien yang menolak `start_*`
+  — JANGAN menekan tombol terhadap KB/Glue produksi saat menguji.
+- Tombol salin rclone (irisan 4b) menyusul lewat jembatan host (file permintaan di folder `Databases` + scheduled task di host), BUKAN
+  dari container. Nilai `rclone` di CHECK `kb_actions.action` sudah disiapkan.
+
+**Belum dikerjakan** (PRD v1.1): tombol rclone (irisan 4b), ringkasan isi laporan Glue + atribusi pasti via `job_id` (butuh `s3:GetObject`
+pada `reports/` dan `state/` — belum ada di policy v5), integrasi ke Beranda.

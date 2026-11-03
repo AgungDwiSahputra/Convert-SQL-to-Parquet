@@ -43,6 +43,18 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 ID_RE = re.compile(r"^[0-9A-Za-z]{10}$")
 DATASET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _BAD_SQL = "(status = 'FAILED' OR COALESCE(failed, 0) > 0)"
+# Ingestion yang dimulai aplikasi ini diberi description berawalan ini (kb_actions) -- asal 'app' tetap dikenali walau baris
+# riwayat lokal hilang (target didaftarkan ulang, database dipulihkan).
+APP_DESCRIPTION_PREFIX = "Monitoring Data:"
+_BY_RE = re.compile(r" oleh (\S+)$")
+
+
+def origin_from_description(description: str | None) -> tuple[str, str | None]:
+    """('app', username) untuk ingestion yang dimulai aplikasi ini, selain itu ('external', None)."""
+    if description and description.startswith(APP_DESCRIPTION_PREFIX):
+        m = _BY_RE.search(description)
+        return "app", (m.group(1) if m else None)
+    return "external", None
 
 
 class KbError(Exception):
@@ -192,7 +204,7 @@ def create_target(conn: sqlite3.Connection, data: dict, by: str, client=None) ->
         sync_target(conn, get_target(conn, target_id), client or aws.client("bedrock-agent"))
     except Exception as e:  # noqa: BLE001 -- target tetap tersimpan; riwayat menyusul di siklus worker
         log.warning("Sinkron awal target %s gagal: %s", fields["name"], aws.error_message(e))
-    _refresh_flow(conn, get_target(conn, target_id))
+    refresh_flow(conn, get_target(conn, target_id))
     return target_view(conn, get_target(conn, target_id))
 
 
@@ -288,8 +300,8 @@ def target_view(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 _UPSERT = (
     "INSERT INTO kb_ingestions (target_id, ingestion_job_id, status, started_at, updated_at, scanned, new_indexed, "
-    "modified_indexed, deleted, failed, description, origin, notified_at, synced_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'external', ?, ?) "
+    "modified_indexed, deleted, failed, description, origin, started_by, notified_at, synced_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT(target_id, ingestion_job_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, "
     "scanned = excluded.scanned, new_indexed = excluded.new_indexed, modified_indexed = excluded.modified_indexed, "
     "deleted = excluded.deleted, failed = excluded.failed, description = excluded.description, "
@@ -319,7 +331,8 @@ def sync_target(conn: sqlite3.Connection, target: sqlite3.Row, client, notify_fa
             conn.execute(_UPSERT, (tid, j["ingestionJobId"], j["status"], _iso(j.get("startedAt")), _iso(j.get("updatedAt")),
                                    st.get("numberOfDocumentsScanned"), st.get("numberOfNewDocumentsIndexed"),
                                    st.get("numberOfModifiedDocumentsIndexed"), st.get("numberOfDocumentsDeleted"),
-                                   st.get("numberOfDocumentsFailed"), j.get("description"), now if first else None, now))
+                                   st.get("numberOfDocumentsFailed"), j.get("description"),
+                                   *origin_from_description(j.get("description")), now if first else None, now))
         # Selesai TANPA masalah -> tidak ada yang perlu diberitahukan (notified_at = penanda "sudah dievaluasi").
         conn.execute(f"UPDATE kb_ingestions SET notified_at = ? WHERE target_id = ? AND notified_at IS NULL "
                      f"AND status IN ('COMPLETE', 'STOPPED') AND NOT {_BAD_SQL}", (now, tid))
@@ -369,7 +382,7 @@ def _notify_row(i: dict) -> tuple:
 # Siklus worker
 # ---------------------------------------------------------------------------
 
-def _refresh_flow(conn: sqlite3.Connection, target: sqlite3.Row, result: dict | None = None) -> None:
+def refresh_flow(conn: sqlite3.Connection, target: sqlite3.Row, result: dict | None = None) -> None:
     """Segarkan kesegaran tiga tahap (LIST S3) target berjalur dokumen. Tidak melempar error."""
     if target["pipeline"] != "documents" or not target["dataset"]:
         return
@@ -425,7 +438,7 @@ def sync_all(conn: sqlite3.Connection, by: str = "worker", client=None) -> dict:
         except Exception:  # noqa: BLE001 -- raw/ hanya informasi
             log.warning("Pindai raw/ gagal diproses.", exc_info=True)
         for t in targets:
-            _refresh_flow(conn, t, result)
+            refresh_flow(conn, t, result)
     return result
 
 
@@ -469,5 +482,5 @@ def sync_now(conn: sqlite3.Connection, target_id: int) -> dict:
             kb_pipeline.refresh_raw(conn, aws.client("s3"), force=True)
         except Exception:  # noqa: BLE001
             log.warning("Pindai raw/ gagal diproses.", exc_info=True)
-        _refresh_flow(conn, row)
+        refresh_flow(conn, row)
     return r

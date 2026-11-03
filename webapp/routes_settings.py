@@ -51,6 +51,7 @@ class KbIn(BaseModel):
     glue_run_time: str = Field("03:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     glue_deadline: str = Field("06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     pending_minutes: int = Field(120, ge=15, le=1440)
+    manual_block_minutes: int = Field(30, ge=0, le=240)
     glue_job_pattern: str = Field("documents-cleansing-and-chunking-{dataset}", min_length=1, max_length=120,
                                   pattern=r"^[A-Za-z0-9_.{}-]+$")
     raw_scan_minutes: int = Field(60, ge=15, le=1440)
@@ -92,7 +93,7 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
                "poll_active_seconds": k["kb.poll_active_seconds"], "last_poll_at": k["kb.last_poll_at"],
                "last_result": k["kb.last_result"], "glue_run_time": k["kb.glue_run_time"],
                "glue_deadline": k["kb.glue_deadline"], "pending_minutes": k["kb.pending_minutes"],
-               "glue_job_pattern": k["kb.glue_job_pattern"],
+               "glue_job_pattern": k["kb.glue_job_pattern"], "manual_block_minutes": k["kb.manual_block_minutes"],
                "raw_scan_minutes": k["kb.raw_scan_minutes"], "raw": k["kb.raw_status"]},
         # Hanya mode & hasil uji -- profile/ARN role dan access key tidak pernah ditampilkan.
         "aws": {"mode": aws.auth_mode(), "region": AWS_REGION, "last_check": k["aws.last_check"]},
@@ -135,7 +136,7 @@ def save_kb(body: KbIn, admin: dict = Depends(require_role("admin")), db: sqlite
     set_settings(db, {"kb.enabled": body.enabled, "kb.poll_idle_seconds": body.poll_idle_seconds,
                       "kb.poll_active_seconds": body.poll_active_seconds, "kb.glue_run_time": body.glue_run_time,
                       "kb.glue_deadline": body.glue_deadline, "kb.pending_minutes": body.pending_minutes,
-                      "kb.glue_job_pattern": body.glue_job_pattern,
+                      "kb.glue_job_pattern": body.glue_job_pattern, "kb.manual_block_minutes": body.manual_block_minutes,
                       "kb.raw_scan_minutes": body.raw_scan_minutes}, admin["username"])
     return {"ok": True}
 

@@ -378,6 +378,25 @@ ALTER TABLE kb_pipeline_status ADD COLUMN glue_run_started_at TEXT;
 ALTER TABLE kb_pipeline_status ADD COLUMN glue_run_ended_at TEXT;
 ALTER TABLE kb_pipeline_status ADD COLUMN glue_error TEXT;            -- pesan aplikasi bila Glue API gagal dibaca
 """,
+    # v15 -- Fase 10 irisan 4: proses manual jalur dokumen (pipeline/kb_actions.py). Web hanya MENGANTRIKAN; worker memeriksa syarat
+    # dengan data AWS terbaru lalu memanggil AWS. Aksi 'rclone' disiapkan untuk irisan 4b (jembatan host) supaya CHECK tidak perlu
+    # dibangun ulang. journal_at = LastModified state/glue/journal.json (publikasi Glue belum tuntas) dari LIST.
+    """
+CREATE TABLE kb_actions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id    INTEGER NOT NULL REFERENCES kb_targets(id) ON DELETE CASCADE,
+    action       TEXT    NOT NULL CHECK (action IN ('ingestion', 'glue_run', 'rclone')),
+    status       TEXT    NOT NULL CHECK (status IN ('queued', 'running', 'started', 'rejected', 'failed')),
+    requested_by TEXT    NOT NULL,
+    requested_at TEXT    NOT NULL,
+    finished_at  TEXT,
+    external_id  TEXT,                  -- ingestionJobId / JobRunId
+    message      TEXT                   -- pesan aplikasi: alasan ditolak / error / hasil
+);
+CREATE INDEX ix_kb_actions_target ON kb_actions (target_id, id);
+CREATE INDEX ix_kb_actions_status ON kb_actions (status, id);
+ALTER TABLE kb_pipeline_status ADD COLUMN journal_at TEXT;
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

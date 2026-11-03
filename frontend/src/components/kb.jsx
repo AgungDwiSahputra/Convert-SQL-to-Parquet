@@ -86,6 +86,20 @@ export function FlowChips({ flow }) {
   )
 }
 
+// Status permintaan proses manual (pipeline/kb_actions.py).
+const ACTION_STATUS = {
+  queued: ['Menunggu worker', 'bg-gray-100 text-gray-600'],
+  running: ['Diproses', 'bg-blue-50 text-blue-700'],
+  started: ['Dimulai', 'bg-brand-50 text-brand-700'],
+  rejected: ['Ditolak', 'bg-amber-50 text-amber-700'],
+  failed: ['Gagal', 'bg-red-50 text-red-700'],
+}
+
+export function ActionStatusBadge({ status }) {
+  const [label, classes] = ACTION_STATUS[status] || [status, 'bg-gray-100 text-gray-600']
+  return <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>{label}</span>
+}
+
 export const PIPELINE_LABEL = { documents: 'Jalur dokumen (rclone → Glue → KB)', manual: 'Manual / lainnya' }
 
 /** Ringkasan statistik satu ingestion: '5 baru · 2 diubah · 0 dihapus · 1 gagal'. */

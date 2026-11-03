@@ -113,6 +113,17 @@ def marker_modified(s3, dataset: str) -> datetime | None:
     return max(times) if times else None
 
 
+def journal_modified(s3, dataset: str) -> datetime | None:
+    """
+    LastModified state/glue/journal.json (None = tidak ada). Jurnal ada = publikasi Glue untuk satu dokumen belum tuntas (run
+    terputus di tengah publikasi; dipulihkan run berikutnya). Selama itu ingestion bisa mengindeks hasil setengah jadi.
+    """
+    key = f"{V2_ROOT}{dataset}/state/glue/journal.json"
+    resp = s3.list_objects_v2(Bucket=S3_BUCKET_NAME, Prefix=key, MaxKeys=1)
+    hit = [o for o in resp.get("Contents", []) if o["Key"] == key]
+    return hit[0]["LastModified"].astimezone(timezone.utc) if hit else None
+
+
 def dataset_exists(s3, dataset: str) -> bool | None:
     """Folder v2/<dataset>/ ada? None bila tidak bisa dipastikan (LIST gagal)."""
     try:
@@ -154,11 +165,16 @@ def glue_job_name(pattern: str, dataset: str) -> str:
 
 
 def latest_glue_run(glue, job_name: str) -> dict | None:
-    """Run Glue terbaru {state, started_at, ended_at} dari GetJobRuns, atau None bila job belum pernah dijalankan."""
+    """
+    Run Glue terbaru {state, started_at, ended_at} dari GetJobRuns, atau None bila job belum pernah dijalankan. Run AKTIF
+    diutamakan: run yang lebih baru bisa saja gagal seketika (mis. trigger terjadwal yang terbentur MaxConcurrentRuns=1 saat run
+    manual masih berjalan) -- tanpa ini syarat proses manual mengira Glue sudah berhenti.
+    """
     runs = glue.get_job_runs(JobName=job_name, MaxResults=3).get("JobRuns", [])
     if not runs:
         return None
-    r = max(runs, key=lambda x: x["StartedOn"])
+    active = [x for x in runs if x["JobRunState"] in ACTIVE_RUN]
+    r = max(active or runs, key=lambda x: x["StartedOn"])
     return {"state": r["JobRunState"], "started_at": _iso(r["StartedOn"]), "ended_at": _iso(r.get("CompletedOn"))}
 
 
@@ -309,6 +325,11 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
         marker = marker_modified(s3, dataset)
     except Exception as e:  # noqa: BLE001
         error = error or aws.error_message(e)
+    journal = _parse(prev["journal_at"]) if prev else None
+    try:
+        journal = journal_modified(s3, dataset)
+    except Exception as e:  # noqa: BLE001
+        error = error or aws.error_message(e)
 
     if glue is not None:
         try:
@@ -344,15 +365,16 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
     with write_tx(conn):
         conn.execute(
             "INSERT INTO kb_pipeline_status (target_id, checked_at, report_latest_at, report_objects, marker_at, error, "
-            "glue_alerted_for, pending_alerted_for, glue_run_state, glue_run_started_at, glue_run_ended_at, glue_error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_id) DO UPDATE SET "
+            "glue_alerted_for, pending_alerted_for, glue_run_state, glue_run_started_at, glue_run_ended_at, glue_error, journal_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_id) DO UPDATE SET "
             "checked_at = excluded.checked_at, report_latest_at = excluded.report_latest_at, "
             "report_objects = excluded.report_objects, marker_at = excluded.marker_at, error = excluded.error, "
             "glue_alerted_for = excluded.glue_alerted_for, pending_alerted_for = excluded.pending_alerted_for, "
             "glue_run_state = excluded.glue_run_state, glue_run_started_at = excluded.glue_run_started_at, "
-            "glue_run_ended_at = excluded.glue_run_ended_at, glue_error = excluded.glue_error",
+            "glue_run_ended_at = excluded.glue_run_ended_at, glue_error = excluded.glue_error, journal_at = excluded.journal_at",
             (tid, _iso(now), _iso(latest), n_objects, _iso(marker), error, alerted_glue, alerted_kb,
-             run["state"] if run else None, run["started_at"] if run else None, run["ended_at"] if run else None, glue_err))
+             run["state"] if run else None, run["started_at"] if run else None, run["ended_at"] if run else None, glue_err,
+             _iso(journal)))
     if problems:
         try:
             notify.notify_kb_stale(conn, dict(target), problems)
@@ -389,7 +411,8 @@ def view(conn: sqlite3.Connection, target: sqlite3.Row, settings: dict | None = 
     now = now or datetime.now(timezone.utc)
     s = settings or get_settings(conn, "kb.")
     st = conn.execute("SELECT * FROM kb_pipeline_status WHERE target_id = ?", (target["id"],)).fetchone()
-    base = {"checked_at": None, "error": None, "glue_error": None, "stale": False, "glue": None, "kb": None, "overall": "unknown",
+    base = {"checked_at": None, "error": None, "glue_error": None, "stale": False, "journal_at": None, "glue": None, "kb": None,
+            "overall": "unknown",
             "schedule": {"run_time": s["kb.glue_run_time"], "deadline": s["kb.glue_deadline"], "pending_minutes": s["kb.pending_minutes"],
                          "glue_job": glue_job_name(s["kb.glue_job_pattern"], target["dataset"] or "")}}
     if st is None:
@@ -402,5 +425,6 @@ def view(conn: sqlite3.Connection, target: sqlite3.Row, settings: dict | None = 
     glue = glue_state(_parse(st["report_latest_at"]), now, hhmm(s["kb.glue_run_time"]), hhmm(s["kb.glue_deadline"]), err, run)
     kb = hold_while_glue_runs(glue, kb_state(_parse(st["marker_at"]), _recent_ingestions(conn, target["id"]), now,
                                               s["kb.pending_minutes"], err))
-    return base | {"checked_at": st["checked_at"], "error": err, "glue_error": st["glue_error"], "stale": not fresh, "glue": glue,
+    return base | {"checked_at": st["checked_at"], "error": err, "glue_error": st["glue_error"], "stale": not fresh,
+                   "journal_at": st["journal_at"], "glue": glue,
                    "kb": kb, "overall": overall(glue, kb)}

@@ -30,7 +30,7 @@ import time
 
 import pyodbc
 
-from pipeline import dq, freshness, kb_sync, maintenance, notify, run_store, s3_inventory, scheduler
+from pipeline import dq, freshness, kb_actions, kb_sync, maintenance, notify, run_store, s3_inventory, scheduler
 from pipeline.config import CONN_STR
 from pipeline.export import LOG_DATEFMT, LOG_FORMAT, log, make_s3_client, run_job, setup_logging
 from pipeline.job_store import JobStoreError, init_db, mark_s3_uploaded
@@ -70,6 +70,13 @@ def scheduler_round(db) -> None:
                     "Pemeriksaan kesegaran: %s dari %s job aktif belum segar (terlambat / belum ada data).", len(result["late"]), result["checked"])
     except Exception:  # noqa: BLE001
         log.exception("Pemeriksaan kesegaran gagal.")
+    try:
+        result = kb_actions.process(db)   # proses manual dari UI (Cleansing Glue / Sync KB) -- sebelum siklus pemantauan
+        if result:
+            log.info("Proses manual Knowledge Base: %s dimulai, %s ditolak, %s gagal, %s kedaluwarsa.",
+                     result["started"], result["rejected"], result["failed"], result["expired"])
+    except Exception:  # noqa: BLE001
+        log.exception("Proses manual Knowledge Base gagal.")
     try:
         result = kb_sync.run_cycle(db)
         if result and (result["error"] or result["errors"]):

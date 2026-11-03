@@ -96,6 +96,7 @@ _MESSAGES = {
     "AwsNotConfigured": "AWS_PROFILE (IAM role) atau access key belum diisi di .env server.",
     "ResourceNotFoundException": "Knowledge Base atau data source tidak ditemukan (periksa ID-nya).",
     "EntityNotFoundException": "Job Glue tidak ditemukan (periksa pola nama job di Pengaturan).",
+    "ConcurrentRunsExceededException": "Job Glue sedang berjalan (maksimal satu run bersamaan).",
     "NoSuchBucket": "Bucket S3 di .env tidak ditemukan.",
     "NoSuchKey": "Objek S3 tidak ditemukan.",
     "ThrottlingException": "AWS membatasi permintaan (throttling); akan dicoba lagi otomatis.",
