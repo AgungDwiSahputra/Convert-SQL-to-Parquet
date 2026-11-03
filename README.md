@@ -54,6 +54,7 @@ LoadParquetProcess/
 | `pipeline/freshness.py` | Kesegaran data per job + penjaga harian (§10) | Aturan kesegaran berubah |
 | `pipeline/aws.py` | Klien AWS terpusat untuk integrasi BARU (Bedrock, S3 baca dokumen): IAM role dulu, penerjemah error, uji koneksi (§12) | Layanan AWS baru |
 | `pipeline/kb_sync.py` | Target & riwayat ingestion Bedrock Knowledge Base, siklus pemantauan worker (§12) | Aturan pemantauan KB berubah |
+| `pipeline/kb_pipeline.py` | Kesegaran tiga tahap jalur dokumen (rclone → Glue → KB) lewat S3 LIST + atribusi asal ingestion (§12) | Aturan kesegaran jalur dokumen berubah |
 | `webapp/` | `main.py` (app, SPA, kunci MIME), `routes_*.py` per kelompok API, `catalog.py` (metadata SQL Server, uji coba, ekspor cepat) | Fitur Web UI |
 | `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite) | Tampilan |
 
@@ -370,7 +371,7 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   menutup masalah lama); kesegaran & celah dari `/api/jobs`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
   `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`, `master_snapshots`, `s3_inventory`,
-  `kb_targets`, `kb_ingestions`. Dinaikkan otomatis saat web, worker, atau CLI start.
+  `kb_targets`, `kb_ingestions`, `kb_pipeline_status`. Dinaikkan otomatis saat web, worker, atau CLI start.
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
   `frontend/src/index.css` (palet hijau, mode terang). Dokumentasi API: `/api/docs`.
@@ -513,6 +514,8 @@ terlihat di sini.
 - **Data belum segar** — hasil penjaga kesegaran harian (kalau diaktifkan), ke penerima tetap.
 - **Ingestion Knowledge Base bermasalah** — ingestion Bedrock yang gagal atau selesai dengan dokumen gagal diindeks,
   sekali per ingestion, ke penerima tetap (saklar tersendiri; §12).
+- **Jalur dokumen terlambat / ingestion tertunda** — job Glue dokumen belum menulis laporan sampai batas lapor, atau isi KB berubah
+  tetapi belum ada ingestion; sekali per episode (saklar yang sama; §12).
 - Penerima = daftar tetap + pembuat run. Akun SMTP hanya di `.env` (`SMTP_*`); isi `APP_BASE_URL`
   supaya email berisi link.
 - Nama pengirim = `SMTP_FROM_NAME` (default "Monitoring Parquet Exporter"; alamatnya tetap `SMTP_FROM`).
@@ -730,7 +733,8 @@ memboroskan biaya embedding; sync manual menyusul sebagai irisan terpisah):
 - *Target* (`kb_targets`): pasangan Knowledge Base ID + Data Source ID yang didaftarkan admin (divalidasi ke Bedrock lewat
   `GetKnowledgeBase`/`GetDataSource`; prefix S3 sumber dibaca dari konfigurasi data source). Nama bucket tidak pernah dikirim ke UI.
 - *Riwayat* (`kb_ingestions`): cermin `ListIngestionJobs` (30 terbaru per target) — termasuk ingestion yang dimulai job Glue
-  atau console. Alasan gagal dari `GetIngestionJob`. `origin`: `external` (default), `app`/`glue` disiapkan untuk irisan berikutnya.
+  atau console. Alasan gagal dari `GetIngestionJob`. `origin`: `external` (default), `glue` (+ `glue_scheduled`) lewat atribusi di bawah,
+  `app` disiapkan untuk sync manual.
 - *Siklus worker* (`kb_sync.run_cycle`, di thread scheduler): jeda `kb.poll_idle_seconds` (300) atau `kb.poll_active_seconds` (45)
   bila ada ingestion berjalan. Sinkron PERTAMA target tidak mengirim email (riwayat lama bukan kejadian baru). Ingestion `FAILED`
   atau `COMPLETE` dengan dokumen gagal → satu email ringkasan (`notify.notify_kb_ingestions`, saklar `notify.on_kb`).
@@ -739,14 +743,17 @@ memboroskan biaya embedding; sync manual menyusul sebagai irisan terpisah):
 
 **Kredensial — aturan beda dari S3 bronze** (`pipeline/aws.py`): klien Bedrock & S3-baca-dokumen memakai `AWS_PROFILE` (IAM role)
 **lebih dulu**; access key hanya kalau `AWS_PROFILE` kosong. Klien S3 bronze (`export.make_s3_client`) tidak berubah: access key
-menang. Akibatnya role GIS04 bisa dipakai untuk Knowledge Base walau belum punya `PutObject`/`DeleteObject` `bronze/*`. Setelah izin itu
-ditambahkan, hapus access key dari `.env` dan semuanya pindah ke role. Profile hasil `aws login` (PC dev) butuh `pip install "botocore[crt]"`
-(tidak di `requirements.txt`; server memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/check_network.py`.
+menang. Policy `svc-kpn-ai-policy` v5 (3 Nov 2026) sudah memberi `PutObject`/`DeleteObject`/`AbortMultipartUpload` `bronze/*` (kode bronze
+hanya memakai `upload_file`/`upload_fileobj`, `delete_object`, dan `list_objects_v2`, jadi tanpa `GetObject` pun cukup). Aturan "access key
+menang" tetap sampai izin itu terbukti di GIS04 (README §12 "Cara menguji"); setelah itu hapus access key dari `.env` dan semuanya pindah
+ke role tanpa mengubah kode. Profile hasil `aws login` (PC dev) butuh `pip install "botocore[crt]"` (tidak di `requirements.txt`; server
+memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/check_network.py`.
 
-**Izin IAM** yang dipakai (policy `svc-kpn-ai-policy`): `bedrock:GetKnowledgeBase`, `GetDataSource`, `ListDataSources`,
-`ListIngestionJobs`, `GetIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen, irisan berikutnya).
-`ListKnowledgeBases` tidak ada → Knowledge Base ID diketik manual. Membaca isi `reports/` & `state/` jalur dokumen butuh
-`s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy; diminta ke Tim CDT).
+**Izin IAM** yang dipakai (policy `svc-kpn-ai-policy` v5): `bedrock:GetKnowledgeBase`, `GetDataSource`, `ListDataSources`,
+`ListIngestionJobs`, `GetIngestionJob`, `StartIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen, irisan
+berikutnya). `bedrock:ListKnowledgeBases` ditambahkan v5 pada resource `knowledge-base/*` dan terbukti berfungsi di GIS04 (uji 3 Nov 2026;
+dugaan awal bahwa aksi List butuh `"Resource": "*"` ternyata keliru); form pendaftaran tetap memakai Knowledge Base ID yang diketik. Membaca isi `reports/` &
+`state/` jalur dokumen butuh `s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy v5).
 
 **Akses**: viewer melihat; operator memuat ulang riwayat; admin mendaftarkan/mengubah/menghapus target dan mengatur
 pemantauan (Pengaturan → AWS & Knowledge Base). API: `/api/kb` (`routes_kb.py`). Pesan error AWS ke UI = pesan sendiri per kode
@@ -760,5 +767,26 @@ itu. Di PC dev, profile `monitoring-datas` di `.env` menunjuk `AWS_CONFIG_FILE=C
 2. **GIS04** — izin role sesungguhnya: `check_network.py`, Pengaturan → Uji koneksi AWS, lalu daftarkan Knowledge Base (semua panggilan
    read-only). Backup `jobs.db` sebelum deploy (migrasi v12 otomatis).
 
-**Belum dikerjakan** (PRD v1.1): kesegaran tiga tahap jalur dokumen (`raw/` → `v2/` → KB) + peringatan "ingestion tertunda"
-(`s3:ListBucket` cukup), atribusi "Glue (otomatis)", sync manual (`StartIngestionJob`, lewat antrian worker), ringkasan laporan Glue.
+**Kesegaran tiga tahap** (`pipeline/kb_pipeline.py`, untuk target berjalur `documents`; hanya S3 `LIST`, tanpa `GetObject`). Fakta hasil LIST
+disimpan di `kb_pipeline_status`; statusnya dihitung saat dibaca (`glue_state`, `kb_state` = fungsi murni dari waktu):
+
+| Tahap | Sumber | Penilaian |
+|---|---|---|
+| 1. rclone | objek terbaru di `documents/raw/` (pindai tiap `kb.raw_scan_minutes`, 60) | **Informasi saja, tidak pernah memicu peringatan**: rclone hanya mengunggah file yang berubah, jadi raw lama tidak berubah itu wajar |
+| 2. Glue | laporan `v2/<ds>/reports/runs/dt=…/<YYYYMMDDTHHMMSS>-<id>.jsonl` (waktu di nama = waktu SELESAI run, UTC) | ok / menunggu / **terlambat**: belum ada laporan sesudah jadwal (`kb.glue_run_time` 03:00 WIB) saat batas (`kb.glue_deadline` 06:00 WIB) lewat. Sebelum jam jadwal, yang dinilai jadwal kemarin |
+| 3. KB | `LastModified` `state/kb_changed_at/<ds>` vs ingestion | ok / berjalan / menunggu / **tertunda** (penanda lebih baru dari semua ingestion dan > `kb.pending_minutes`, 120) / gagal |
+
+- Email (`notify_kb_stale`, saklar `notify.on_kb`) **sekali per episode**: per jadwal Glue (`expected_run_at`) dan per penanda perubahan
+  (`marker_at`). Pembacaan PERTAMA target tidak mengirim email. Gagal baca (izin ditolak, format nama laporan berubah) = status
+  `unreadable`, BUKAN segar, tanpa email. Dataset salah ketik ditolak saat mendaftar (folder `v2/<dataset>/` harus ada).
+- **Atribusi asal ingestion** (`kb_pipeline.attribute`): laporan Glue yang selesai 0–30 dtk sesudah ingestion mulai = dimulai job Glue
+  (selisih nyata 9–10 dtk pada 7 dari 7 kasus); jadwal bila laporan selesai di jendela [`glue_run_time`, `glue_deadline`) WIB, selain itu "Glue ·
+  di luar jadwal" (job Glue dokumen juga dijalankan di luar jam jadwal dan tetap memulai ingestion sendiri). Tanpa laporan di dekatnya = "Di luar
+  aplikasi" (console/manual/pemuatan awal). KESIMPULAN dari waktu — hanya label; kepastian via `job_id` di state butuh `s3:GetObject`. Ingestion
+  dinilai setelah ≥ 2 menit dan hanya sekali (`origin_checked`).
+- **Catatan arah**: jadwal 03:00 + batas 06:00 mengikuti jadwal Glue SAAT INI dan sifatnya menebak waktu selesai. Kelak run Glue (termasuk cleansing
+  dokumen) dijalankan dari sistem ini (PRD Fase 6/7); status dibaca langsung dari JobRun dan tebakan jam itu tidak diperlukan lagi. Penilaian
+  "ingestion tertunda" tetap berlaku.
+
+**Belum dikerjakan** (PRD v1.1): sync manual (`StartIngestionJob`, lewat antrian worker; izin sudah ada di policy v5), ringkasan isi laporan
+Glue + atribusi pasti via `job_id` (butuh `s3:GetObject` pada `reports/` dan `state/` — belum ada di policy v5), integrasi ke Beranda.

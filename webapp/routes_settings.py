@@ -48,6 +48,10 @@ class KbIn(BaseModel):
     enabled: bool = True
     poll_idle_seconds: int = Field(300, ge=60, le=3600)
     poll_active_seconds: int = Field(45, ge=15, le=600)
+    glue_run_time: str = Field("03:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    glue_deadline: str = Field("06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    pending_minutes: int = Field(120, ge=15, le=1440)
+    raw_scan_minutes: int = Field(60, ge=15, le=1440)
 
 
 class AuthIn(BaseModel):
@@ -84,7 +88,9 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
                                               "AND can_export = 0").fetchone()[0]},
         "kb": {"enabled": k["kb.enabled"], "poll_idle_seconds": k["kb.poll_idle_seconds"],
                "poll_active_seconds": k["kb.poll_active_seconds"], "last_poll_at": k["kb.last_poll_at"],
-               "last_result": k["kb.last_result"]},
+               "last_result": k["kb.last_result"], "glue_run_time": k["kb.glue_run_time"],
+               "glue_deadline": k["kb.glue_deadline"], "pending_minutes": k["kb.pending_minutes"],
+               "raw_scan_minutes": k["kb.raw_scan_minutes"], "raw": k["kb.raw_status"]},
         # Hanya mode & hasil uji -- profile/ARN role dan access key tidak pernah ditampilkan.
         "aws": {"mode": aws.auth_mode(), "region": AWS_REGION, "last_check": k["aws.last_check"]},
         "app_base_url": APP_BASE_URL,
@@ -121,8 +127,12 @@ def save_dq(body: DqIn, admin: dict = Depends(require_role("admin")), db: sqlite
 
 @router.put("/kb")
 def save_kb(body: KbIn, admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
+    if body.glue_deadline <= body.glue_run_time:   # "HH:MM" berformat tetap -> perbandingan string = perbandingan waktu
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Batas lapor Glue harus sesudah jam jadwal Glue (hari yang sama).")
     set_settings(db, {"kb.enabled": body.enabled, "kb.poll_idle_seconds": body.poll_idle_seconds,
-                      "kb.poll_active_seconds": body.poll_active_seconds}, admin["username"])
+                      "kb.poll_active_seconds": body.poll_active_seconds, "kb.glue_run_time": body.glue_run_time,
+                      "kb.glue_deadline": body.glue_deadline, "kb.pending_minutes": body.pending_minutes,
+                      "kb.raw_scan_minutes": body.raw_scan_minutes}, admin["username"])
     return {"ok": True}
 
 

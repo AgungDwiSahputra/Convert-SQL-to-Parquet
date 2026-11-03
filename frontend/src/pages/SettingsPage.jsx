@@ -8,7 +8,7 @@ import { fmtDateTime, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, PageHeader, Toggle, inputClass } from '../components/ui'
 
 const SECURITY_LABEL = { none: 'tanpa enkripsi', starttls: 'STARTTLS', ssl: 'SSL/TLS' }
-const KIND_LABEL = { run_failed: 'Run gagal', dq_warning: 'Peringatan DQ', anomaly: 'Anomali', stale: 'Data terlambat', kb_ingestion: 'Ingestion KB', test: 'Uji' }
+const KIND_LABEL = { run_failed: 'Run gagal', dq_warning: 'Peringatan DQ', anomaly: 'Anomali', stale: 'Data terlambat', kb_ingestion: 'Ingestion KB', kb_stale: 'Jalur dokumen', test: 'Uji' }
 const STATUS_TONE = { sent: 'mint', failed: 'amber', skipped: 'gray' }
 const STATUS_LABEL = { sent: 'Terkirim', failed: 'Gagal', skipped: 'Dilewati' }
 const AWS_MODE = { role: ['IAM role (AWS_PROFILE)', 'mint'], access_key: ['Access key', 'blue'], none: ['Belum diatur', 'amber'] }
@@ -75,7 +75,7 @@ export default function SettingsPage() {
     setKbSaving(true)
     setKbMessage(null)
     try {
-      await api('/settings/kb', { method: 'PUT', body: { enabled: kbForm.enabled, poll_idle_seconds: kbForm.poll_idle_seconds, poll_active_seconds: kbForm.poll_active_seconds } })
+      await api('/settings/kb', { method: 'PUT', body: { enabled: kbForm.enabled, poll_idle_seconds: kbForm.poll_idle_seconds, poll_active_seconds: kbForm.poll_active_seconds, glue_run_time: kbForm.glue_run_time, glue_deadline: kbForm.glue_deadline, pending_minutes: kbForm.pending_minutes, raw_scan_minutes: kbForm.raw_scan_minutes } })
       setKbMessage({ tone: 'info', text: 'Pengaturan pemantauan Knowledge Base tersimpan (berlaku dalam beberapa detik, tanpa restart).' })
     } catch (e) {
       setKbMessage({ tone: 'error', text: e.message })
@@ -380,6 +380,25 @@ export default function SettingsPage() {
                     <Field label="Jeda saat ada ingestion berjalan" htmlFor="kb-active" hint="Detik, 15–600.">
                       <input id="kb-active" type="number" min={15} max={600} className={inputClass} value={kbForm.poll_active_seconds} onChange={(e) => setKbForm((f) => ({ ...f, poll_active_seconds: Number(e.target.value) }))} />
                     </Field>
+                  </div>
+                )}
+                {kbForm.enabled && (
+                  <div className="space-y-4 rounded-xl border border-gray-200/80 p-4">
+                    <p className="text-sm font-medium text-gray-800">Jalur dokumen (rclone → Glue → KB)</p>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field label="Jadwal cleansing Glue (WIB)" htmlFor="kb-run-time" hint="Jam run Glue dokumen SAAT INI. Kelak run dijalankan dari aplikasi ini sehingga tebakan jam tak diperlukan.">
+                        <input id="kb-run-time" type="time" className={inputClass} value={kbForm.glue_run_time} onChange={(e) => setKbForm((f) => ({ ...f, glue_run_time: e.target.value }))} />
+                      </Field>
+                      <Field label="Batas lapor Glue (WIB)" htmlFor="kb-deadline" hint="Belum ada laporan run sesudah jadwal pada jam ini → email “Glue terlambat”.">
+                        <input id="kb-deadline" type="time" className={inputClass} value={kbForm.glue_deadline} onChange={(e) => setKbForm((f) => ({ ...f, glue_deadline: e.target.value }))} />
+                      </Field>
+                      <Field label="Ingestion dianggap tertunda" htmlFor="kb-pending" hint="Menit sejak isi KB berubah tanpa ada ingestion sesudahnya (15–1440).">
+                        <input id="kb-pending" type="number" min={15} max={1440} className={inputClass} value={kbForm.pending_minutes} onChange={(e) => setKbForm((f) => ({ ...f, pending_minutes: Number(e.target.value) }))} />
+                      </Field>
+                      <Field label="Jeda pindai raw/" htmlFor="kb-raw" hint="Menit, hanya informasi (15–1440).">
+                        <input id="kb-raw" type="number" min={15} max={1440} className={inputClass} value={kbForm.raw_scan_minutes} onChange={(e) => setKbForm((f) => ({ ...f, raw_scan_minutes: Number(e.target.value) }))} />
+                      </Field>
+                    </div>
                   </div>
                 )}
                 {data.kb.last_poll_at && (

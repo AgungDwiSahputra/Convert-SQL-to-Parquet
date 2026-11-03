@@ -353,6 +353,23 @@ CREATE TABLE kb_ingestions (
 );
 CREATE INDEX ix_kb_ingestions_target ON kb_ingestions (target_id, started_at);
 """,
+    # v13 -- Fase 10 irisan 3: kesegaran tiga tahap jalur dokumen (pipeline/kb_pipeline.py). Hanya fakta hasil LIST S3 yang
+    # disimpan; status (segar/terlambat/tertunda) dihitung saat dibaca. origin_checked = atribusi asal ingestion sudah dicoba;
+    # glue_scheduled = 1 bila ingestion dimulai run Glue terjadwal, 0 bila run Glue di luar jadwal (NULL = bukan Glue).
+    """
+ALTER TABLE kb_ingestions ADD COLUMN origin_checked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_ingestions ADD COLUMN glue_scheduled INTEGER;
+CREATE TABLE kb_pipeline_status (
+    target_id           INTEGER PRIMARY KEY REFERENCES kb_targets(id) ON DELETE CASCADE,
+    checked_at          TEXT    NOT NULL,   -- terakhir LIST dijalankan
+    report_latest_at    TEXT,               -- waktu SELESAI laporan run Glue terbaru (dari nama file, UTC)
+    report_objects      INTEGER,            -- jumlah objek di folder laporan 3 hari terakhir
+    marker_at           TEXT,               -- LastModified state/kb_changed_at/<dataset> (penanda isi KB berubah)
+    error               TEXT,               -- pesan aplikasi bila LIST gagal / format tak dikenal
+    glue_alerted_for    TEXT,               -- jadwal run (expected_run_at) yang sudah dikirimi email terlambat
+    pending_alerted_for TEXT                -- penanda perubahan (marker_at) yang sudah dikirimi email tertunda
+);
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

@@ -35,6 +35,11 @@ DEFAULTS = {
     "kb.enabled": True,             # pantau ingestion Knowledge Base (worker) -- hanya membaca AWS
     "kb.poll_idle_seconds": 300,    # jeda sinkron riwayat ingestion saat tidak ada yang berjalan
     "kb.poll_active_seconds": 45,   # jeda saat ada ingestion yang masih berjalan
+    "kb.glue_run_time": "03:00",    # jam (WIB) jadwal cleansing Glue dokumen SAAT INI (kelak run Glue dijalankan dari aplikasi ini)
+    "kb.glue_deadline": "06:00",    # jam (WIB) batas: belum ada laporan run sesudah jadwal -> "Glue terlambat" + email
+    "kb.pending_minutes": 120,      # penanda perubahan KB tanpa ingestion sesudahnya lebih lama dari ini -> "ingestion tertunda"
+    "kb.raw_scan_minutes": 60,      # jeda pindai documents/raw/ (hanya informasi)
+    "kb.raw_status": None,          # hasil pindai raw/ terakhir {checked_at, latest_at, objects, partial, error}
     "kb.active": False,             # ada ingestion berjalan pada sinkron terakhir (menentukan jeda di atas)
     "kb.last_poll_at": None,        # waktu (UTC) siklus sinkron terakhir dimulai
     "kb.last_result": None,         # ringkasan siklus sinkron terakhir

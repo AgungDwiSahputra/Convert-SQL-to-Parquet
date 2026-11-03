@@ -505,6 +505,24 @@ def notify_kb_ingestions(conn: sqlite3.Connection, target: dict, rows: list[tupl
           link_label="Buka Knowledge Base", tone="danger", facts=facts)
 
 
+def notify_kb_stale(conn: sqlite3.Connection, target: dict, problems: list[tuple]) -> None:
+    """
+    Email kesegaran jalur dokumen (pipeline/kb_pipeline.py): Glue cleansing terlambat / ingestion KB tertunda. Sekali per episode
+    (dijaga kb_pipeline). problems = [(tahap, masalah, keterangan)]. Penerima tetap; gate saklar notify.on_kb.
+    """
+    settings = get_settings(conn, "notify.")
+    if not settings["notify.on_kb"] or not problems:
+        return
+    label = target.get("title") or target["name"]
+    subject = f"{SUBJECT_PREFIX} Jalur dokumen {label}: {len(problems)} tahap bermasalah"
+    intro = (f"Jalur dokumen untuk Knowledge Base \"{label}\" belum berjalan sebagaimana mestinya, sehingga isi KB bisa tertinggal "
+             f"dari dokumen terbaru. Periksa job Glue dokumen dan riwayat ingestion di aplikasi.")
+    facts = [("Knowledge Base", label), ("Dataset", target.get("dataset") or "-"), ("Tahap bermasalah", str(len(problems)))]
+    _send(conn, "kb_stale", settings["notify.recipients"], subject, "Jalur dokumen terlambat", intro,
+          rows=problems, headers=("Tahap", "Masalah", "Keterangan"), badge_col=1, link=_link(f"/kb/{target['id']}"),
+          link_label="Buka Knowledge Base", tone="danger", facts=facts)
+
+
 def send_test(conn: sqlite3.Connection, to: str, by: str) -> tuple[str, str | None]:
     subject = f"{SUBJECT_PREFIX} Email uji"
     intro = "Kalau Anda membaca email ini, setelan SMTP sudah benar dan notifikasi monitoring siap dikirim."

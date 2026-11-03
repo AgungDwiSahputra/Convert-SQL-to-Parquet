@@ -58,7 +58,9 @@ def _monitor(db: sqlite3.Connection) -> dict:
     s = get_settings(db, "kb.")
     return {"enabled": s["kb.enabled"], "last_poll_at": s["kb.last_poll_at"], "last_result": s["kb.last_result"],
             "poll_idle_seconds": s["kb.poll_idle_seconds"], "poll_active_seconds": s["kb.poll_active_seconds"],
-            "auth_mode": aws.auth_mode()}
+            "auth_mode": aws.auth_mode(), "raw": s["kb.raw_status"],
+            "schedule": {"run_time": s["kb.glue_run_time"], "deadline": s["kb.glue_deadline"],
+                         "pending_minutes": s["kb.pending_minutes"]}}
 
 
 @router.get("")

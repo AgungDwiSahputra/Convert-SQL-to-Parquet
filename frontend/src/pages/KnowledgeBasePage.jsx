@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateTime, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, EmptyState, Field, LoadingBlock, Modal, PageHeader, inputClass } from '../components/ui'
-import { KbHealthBadge, PIPELINE_LABEL, ingestionStats } from '../components/kb'
+import { FlowChips, KbHealthBadge, PIPELINE_LABEL, ingestionStats } from '../components/kb'
 
 const selectClass = `${inputClass} pr-8`
 const slug = (s) => (s || '').toLowerCase().replace(/^kbprep-/, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
@@ -192,6 +192,7 @@ export default function KnowledgeBasePage() {
                       ) : (
                         <p className="text-xs text-gray-400">Belum ada ingestion tercatat.</p>
                       )}
+                      <FlowChips flow={t.flow} />
                       {t.poll_error && <p className="text-xs text-amber-700">Sinkron gagal: {t.poll_error}</p>}
                     </div>
                     <KbHealthBadge health={t.health} />

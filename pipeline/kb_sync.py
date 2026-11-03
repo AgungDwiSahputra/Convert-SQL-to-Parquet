@@ -7,6 +7,9 @@ Apa yang dikerjakan modul ini:
     dokumen atau console AWS, bukan hanya yang dimulai aplikasi ini;
   * siklus pemantauan worker (run_cycle): sinkron riwayat + email bila ingestion gagal / ada dokumen gagal diindeks.
 
+  * kesegaran tiga tahap jalur dokumen (rclone -> Glue -> KB) lewat S3 LIST, untuk target berjalur 'documents' -- lihat
+    pipeline/kb_pipeline.py.
+
 Yang SENGAJA tidak dikerjakan: memicu ingestion otomatis. Untuk KB dokumen, job Glue "documents cleansing and
 chunking" sudah memulai ingestion sendiri (README §12); pemicu kedua dari sini berisiko ditolak Bedrock atau
 memboroskan biaya embedding. Aplikasi hanya MEMBACA AWS (get/list). Sync manual (start_ingestion_job) menyusul
@@ -23,7 +26,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
-from pipeline import aws, notify
+from pipeline import aws, kb_pipeline, notify
 from pipeline.app_settings import get_settings, set_settings
 from pipeline.config import S3_BUCKET_NAME
 from pipeline.job_store import utc_now, write_tx
@@ -171,6 +174,7 @@ def create_target(conn: sqlite3.Connection, data: dict, by: str, client=None) ->
     kb_id, ds_id = str(data.get("knowledge_base_id") or "").strip(), str(data.get("data_source_id") or "").strip()
     fields = _clean(data)
     info = describe_data_source(kb_id, ds_id, client)
+    _check_dataset(fields["pipeline"], fields["dataset"])
     if conn.execute("SELECT 1 FROM kb_targets WHERE name = ?", (fields["name"],)).fetchone():
         raise KbError(f"Nama target '{fields['name']}' sudah dipakai.")
     if conn.execute("SELECT 1 FROM kb_targets WHERE knowledge_base_id = ? AND data_source_id = ?",
@@ -188,7 +192,20 @@ def create_target(conn: sqlite3.Connection, data: dict, by: str, client=None) ->
         sync_target(conn, get_target(conn, target_id), client or aws.client("bedrock-agent"))
     except Exception as e:  # noqa: BLE001 -- target tetap tersimpan; riwayat menyusul di siklus worker
         log.warning("Sinkron awal target %s gagal: %s", fields["name"], aws.error_message(e))
+    _refresh_flow(conn, get_target(conn, target_id))
     return target_view(conn, get_target(conn, target_id))
+
+
+def _check_dataset(pipeline: str, dataset: str | None) -> None:
+    """Jalur dokumen: folder v2/<dataset>/ harus ada di S3 (salah ketik = peringatan palsu 'Glue terlambat'). Tak bisa dicek = lolos."""
+    if pipeline != "documents" or not dataset:
+        return
+    try:
+        exists = kb_pipeline.dataset_exists(aws.client("s3"), dataset)
+    except Exception:  # noqa: BLE001
+        exists = None
+    if exists is False:
+        raise KbError(f"Folder dataset '{dataset}' tidak ditemukan di {kb_pipeline.V2_ROOT}. Periksa ejaan nama dataset.")
 
 
 def update_target(conn: sqlite3.Connection, target_id: int, data: dict) -> dict:
@@ -197,11 +214,15 @@ def update_target(conn: sqlite3.Connection, target_id: int, data: dict) -> dict:
         raise KbError("Target tidak ditemukan.")
     merged = {"pipeline": row["pipeline"], "dataset": row["dataset"], **data}
     fields = _clean(merged, partial=True)
+    if fields.get("pipeline") == "documents" and (fields.get("dataset") != row["dataset"] or row["pipeline"] != "documents"):
+        _check_dataset("documents", fields.get("dataset"))
     fields.pop("name", None)  # nama tidak bisa diubah (kunci tampilan & laporan)
     allowed = {k: v for k, v in fields.items() if k in ("title", "pipeline", "dataset", "notes", "enabled")}
     if allowed:
         sets = ", ".join(f"{k} = ?" for k in allowed)
         conn.execute(f"UPDATE kb_targets SET {sets}, updated_at = ? WHERE id = ?", (*allowed.values(), utc_now(), target_id))
+        if fields.get("pipeline") != "documents":
+            conn.execute("DELETE FROM kb_pipeline_status WHERE target_id = ?", (target_id,))
     return target_view(conn, get_target(conn, target_id))
 
 
@@ -224,7 +245,8 @@ def _ingestion_dict(r: sqlite3.Row) -> dict:
             "updated_at": updated, "duration_s": duration, "scanned": r["scanned"], "new_indexed": r["new_indexed"],
             "modified_indexed": r["modified_indexed"], "deleted": r["deleted"], "failed": r["failed"],
             "failure_reasons": json.loads(r["failure_reasons"]) if r["failure_reasons"] else [],
-            "description": r["description"], "origin": r["origin"], "started_by": r["started_by"]}
+            "description": r["description"], "origin": r["origin"], "glue_scheduled": r["glue_scheduled"],
+            "started_by": r["started_by"]}
 
 
 def health_of(last: dict | None, running: int) -> str:
@@ -256,7 +278,8 @@ def target_view(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "data_source_id": row["data_source_id"], "source_prefix": row["source_prefix"], "pipeline": row["pipeline"],
             "dataset": row["dataset"], "enabled": bool(row["enabled"]), "notes": row["notes"],
             "polled_at": row["polled_at"], "poll_error": row["poll_error"], "created_by": row["created_by"],
-            "created_at": row["created_at"], "last": last, "running": running, "health": health_of(last, running)}
+            "created_at": row["created_at"], "last": last, "running": running, "health": health_of(last, running),
+            "flow": kb_pipeline.view(conn, row)}
 
 
 # ---------------------------------------------------------------------------
@@ -346,14 +369,28 @@ def _notify_row(i: dict) -> tuple:
 # Siklus worker
 # ---------------------------------------------------------------------------
 
+def _refresh_flow(conn: sqlite3.Connection, target: sqlite3.Row, result: dict | None = None) -> None:
+    """Segarkan kesegaran tiga tahap (LIST S3) target berjalur dokumen. Tidak melempar error."""
+    if target["pipeline"] != "documents" or not target["dataset"]:
+        return
+    try:
+        s3 = aws.client("s3")
+    except Exception as e:  # noqa: BLE001
+        kb_pipeline.record_error(conn, target["id"], aws.error_message(e))
+        return
+    r = kb_pipeline.refresh(conn, target, s3)
+    if result is not None:
+        result["flow_alerts"] += r["alerts"]
+
+
 def sync_all(conn: sqlite3.Connection, by: str = "worker", client=None) -> dict:
     """
-    Sinkronkan semua target aktif. Return {at, by, targets, ok, errors[{target, error}], error, active, notified};
+    Sinkronkan semua target aktif. Return {at, by, targets, ok, errors[{target, error}], error, active, notified, flow_alerts};
     `error` = kegagalan menyeluruh (kredensial/jaringan) yang menghentikan siklus. Tidak melempar error.
     """
     targets = list_targets(conn, enabled_only=True)
     result = {"at": utc_now(), "by": by, "targets": len(targets), "ok": 0, "errors": [], "error": None,
-              "active": False, "notified": 0}
+              "active": False, "notified": 0, "flow_alerts": 0}
     if not targets:
         return result
     try:
@@ -376,6 +413,13 @@ def sync_all(conn: sqlite3.Connection, by: str = "worker", client=None) -> dict:
         result["ok"] += 1
         result["active"] = result["active"] or r["running"] > 0
         result["notified"] += r["notified"]
+    if any(t["pipeline"] == "documents" for t in targets) and not result["error"]:
+        try:
+            kb_pipeline.refresh_raw(conn, aws.client("s3"))
+        except Exception:  # noqa: BLE001 -- raw/ hanya informasi
+            log.warning("Pindai raw/ gagal diproses.", exc_info=True)
+        for t in targets:
+            _refresh_flow(conn, t, result)
     return result
 
 
@@ -414,4 +458,10 @@ def sync_now(conn: sqlite3.Connection, target_id: int) -> dict:
     except KbAwsError as e:
         conn.execute("UPDATE kb_targets SET poll_error = ? WHERE id = ?", (str(e), target_id))
         raise
+    if row["pipeline"] == "documents":
+        try:
+            kb_pipeline.refresh_raw(conn, aws.client("s3"), force=True)
+        except Exception:  # noqa: BLE001
+            log.warning("Pindai raw/ gagal diproses.", exc_info=True)
+        _refresh_flow(conn, row)
     return r

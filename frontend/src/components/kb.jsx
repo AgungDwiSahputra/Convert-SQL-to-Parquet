@@ -40,13 +40,50 @@ export function IngestionBadge({ status }) {
   )
 }
 
-// Asal pemicu ingestion. 'external' = dimulai di luar aplikasi ini (job Glue dokumen, console AWS, dst.).
-export const ORIGIN_LABEL = { app: 'Aplikasi', glue: 'Glue (otomatis)', external: 'Di luar aplikasi' }
-export const ORIGIN_HINT = {
-  app: 'Dimulai dari aplikasi ini.',
-  glue: 'Dimulai otomatis oleh job Glue dokumen.',
-  external: 'Dimulai di luar aplikasi ini — umumnya job Glue dokumen atau console AWS.',
+// Asal pemicu ingestion (pipeline/kb_pipeline.attribute). Glue = ada laporan run Glue yang selesai ≤ 30 dtk sesudah ingestion
+// mulai (KESIMPULAN dari waktu, bukan catatan Bedrock). Terjadwal = laporan selesai di jendela jadwal; selain itu run Glue di luar jadwal.
+export function originInfo(i) {
+  if (i.origin === 'app') return { label: 'Aplikasi', hint: 'Dimulai dari aplikasi ini.' }
+  if (i.origin === 'glue') {
+    return i.glue_scheduled
+      ? { label: 'Glue · terjadwal', hint: 'Dimulai job Glue dokumen pada run terjadwal. Disimpulkan dari waktu: laporan run Glue selesai ≤ 30 detik sesudah ingestion mulai.' }
+      : { label: 'Glue · di luar jadwal', hint: 'Dimulai job Glue dokumen pada run di luar jadwal (job dijalankan di luar jam jadwal; ingestion tetap dimulai Glue). Disimpulkan dari waktu laporan.' }
+  }
+  return { label: 'Di luar aplikasi', hint: 'Tidak ada laporan Glue di dekat waktu ini — umumnya console AWS (manual) atau pemuatan awal.' }
 }
+// Tahap jalur dokumen (pipeline/kb_pipeline): status Glue & KB.
+const GLUE_STAGE = {
+  ok: ['Glue segar', 'bg-brand-50 text-brand-700'],
+  waiting: ['Glue menunggu', 'bg-gray-100 text-gray-600'],
+  late: ['Glue terlambat', 'bg-red-50 text-red-700'],
+  unreadable: ['Glue tak terbaca', 'bg-amber-50 text-amber-700'],
+}
+const KB_STAGE = {
+  ok: ['KB terbarui', 'bg-brand-50 text-brand-700'],
+  running: ['KB berjalan', 'bg-blue-50 text-blue-700'],
+  waiting: ['KB menunggu', 'bg-gray-100 text-gray-600'],
+  pending: ['KB tertunda', 'bg-red-50 text-red-700'],
+  failed: ['KB gagal', 'bg-red-50 text-red-700'],
+  none: ['KB belum berubah', 'bg-gray-100 text-gray-500'],
+  unreadable: ['KB tak terbaca', 'bg-amber-50 text-amber-700'],
+}
+
+export function StageBadge({ kind, status }) {
+  const [label, classes] = (kind === 'glue' ? GLUE_STAGE : KB_STAGE)[status] || ['–', 'bg-gray-100 text-gray-500']
+  return <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>{label}</span>
+}
+
+/** Dua penanda kecil (Glue, KB) untuk target jalur dokumen di daftar. */
+export function FlowChips({ flow }) {
+  if (!flow?.glue || !flow?.kb) return null
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <StageBadge kind="glue" status={flow.glue.status} />
+      <StageBadge kind="kb" status={flow.kb.status} />
+    </span>
+  )
+}
+
 export const PIPELINE_LABEL = { documents: 'Jalur dokumen (rclone → Glue → KB)', manual: 'Manual / lainnya' }
 
 /** Ringkasan statistik satu ingestion: '5 baru · 2 diubah · 0 dihapus · 1 gagal'. */

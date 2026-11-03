@@ -6,7 +6,7 @@ import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateTime, fmtDuration, fmtNumber, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, Modal, PageHeader, Switch, inputClass } from '../components/ui'
-import { IngestionBadge, KbHealthBadge, ORIGIN_HINT, ORIGIN_LABEL, PIPELINE_LABEL } from '../components/kb'
+import { IngestionBadge, KbHealthBadge, PIPELINE_LABEL, StageBadge, originInfo } from '../components/kb'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -84,6 +84,61 @@ function EditModal({ open, target, onClose, onSaved }) {
         {error && <Alert tone="error">{error}</Alert>}
       </form>
     </Modal>
+  )
+}
+
+function FlowCard({ flow, raw }) {
+  const sched = flow.schedule
+  const g = flow.glue
+  const k = flow.kb
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader title="Jalur dokumen" description="rclone → Glue cleansing → ingestion Knowledge Base · dibaca dari S3 (hanya daftar objek)" />
+      {flow.error && <div className="px-5 pt-4"><Alert tone="warning" title="Sebagian status tidak dapat dibaca">{flow.error}</Alert></div>}
+      <ul className="divide-y divide-gray-100">
+        <li className="flex items-start justify-between gap-4 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-800">1 · Salin dokumen (rclone)</p>
+            <p className="mt-0.5 text-xs text-gray-500">
+              {raw?.error ? raw.error : raw?.latest_at ? `File baru terakhir di raw/: ${fmtDateTime(raw.latest_at)} · ${fmtNumber(raw.objects)} objek${raw.partial ? '+' : ''}` : 'Belum dipindai.'}
+            </p>
+            <p className="mt-0.5 text-xs text-gray-400">Hanya informasi: rclone hanya mengunggah file yang berubah, jadi raw/ yang lama tidak berubah itu wajar.</p>
+          </div>
+          <Badge>Info</Badge>
+        </li>
+        <li className="flex items-start justify-between gap-4 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-800">2 · Cleansing Glue</p>
+            {g ? (
+              <>
+                <p className="mt-0.5 text-xs text-gray-500">Laporan run terakhir selesai {g.last_report_at ? fmtDateTime(g.last_report_at) : '–'}</p>
+                <p className="mt-0.5 text-xs text-gray-400">
+                  Jadwal {sched.run_time} WIB · batas lapor {sched.deadline} WIB
+                  {g.status === 'late' && <span className="text-red-600"> · belum ada laporan sesudah jadwal {fmtDateTime(g.expected_run_at)}</span>}
+                </p>
+              </>
+            ) : <p className="mt-0.5 text-xs text-gray-400">Belum diperiksa.</p>}
+          </div>
+          {g && <StageBadge kind="glue" status={g.status} />}
+        </li>
+        <li className="flex items-start justify-between gap-4 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-800">3 · Ingestion Knowledge Base</p>
+            {k ? (
+              <>
+                <p className="mt-0.5 text-xs text-gray-500">{k.marker_at ? `Isi KB terakhir berubah ${fmtDateTime(k.marker_at)}` : 'Belum ada penanda perubahan.'}</p>
+                <p className="mt-0.5 text-xs text-gray-400">
+                  Dianggap tertunda bila tidak ada ingestion sesudah perubahan selama {sched.pending_minutes} menit
+                  {k.status === 'pending' && <span className="text-red-600"> · belum ada ingestion sejak perubahan itu</span>}
+                </p>
+              </>
+            ) : <p className="mt-0.5 text-xs text-gray-400">Belum diperiksa.</p>}
+          </div>
+          {k && <StageBadge kind="kb" status={k.status} />}
+        </li>
+      </ul>
+      {flow.checked_at && <p className="border-t border-gray-100 px-5 py-2.5 text-xs text-gray-400">Diperiksa {fmtRelative(flow.checked_at)}.</p>}
+    </Card>
   )
 }
 
@@ -173,6 +228,8 @@ export default function KnowledgeBaseDetailPage() {
           </dl>
         </Card>
 
+        {t.flow && <FlowCard flow={t.flow} raw={data.monitor?.raw} />}
+
         <Card className="overflow-hidden">
           <CardHeader title="Riwayat ingestion" description="50 terbaru, termasuk yang dimulai job Glue atau console AWS" />
           {ingestions.length === 0 ? (
@@ -212,7 +269,7 @@ export default function KnowledgeBaseDetailPage() {
                       <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.modified_indexed)}</td>
                       <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.deleted)}</td>
                       <td className={`px-3 py-3 text-right tabular-nums ${i.failed ? 'font-semibold text-red-700' : 'text-gray-600'}`}>{fmtNumber(i.failed)}</td>
-                      <td className="px-4 py-3 text-xs text-gray-500" title={ORIGIN_HINT[i.origin]}>{ORIGIN_LABEL[i.origin] || i.origin}{i.started_by ? ` · ${i.started_by}` : ''}</td>
+                      <td className="px-4 py-3 text-xs text-gray-500" title={originInfo(i).hint}>{originInfo(i).label}{i.started_by ? ` · ${i.started_by}` : ''}</td>
                     </tr>
                   ))}
                 </tbody>
