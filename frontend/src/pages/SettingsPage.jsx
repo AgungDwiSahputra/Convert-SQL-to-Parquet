@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { Bell, HardDrive, KeyRound, Mail, RefreshCw, Send, ShieldCheck } from 'lucide-react'
+import { Bell, Cloud, HardDrive, KeyRound, Mail, RefreshCw, Send, ShieldCheck } from 'lucide-react'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
@@ -8,9 +8,17 @@ import { fmtDateTime, fmtRelative } from '../lib/format'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, PageHeader, Toggle, inputClass } from '../components/ui'
 
 const SECURITY_LABEL = { none: 'tanpa enkripsi', starttls: 'STARTTLS', ssl: 'SSL/TLS' }
-const KIND_LABEL = { run_failed: 'Run gagal', dq_warning: 'Peringatan DQ', anomaly: 'Anomali', stale: 'Data terlambat', test: 'Uji' }
+const KIND_LABEL = { run_failed: 'Run gagal', dq_warning: 'Peringatan DQ', anomaly: 'Anomali', stale: 'Data terlambat', kb_ingestion: 'Ingestion KB', test: 'Uji' }
 const STATUS_TONE = { sent: 'mint', failed: 'amber', skipped: 'gray' }
 const STATUS_LABEL = { sent: 'Terkirim', failed: 'Gagal', skipped: 'Dilewati' }
+const AWS_MODE = { role: ['IAM role (AWS_PROFILE)', 'mint'], access_key: ['Access key', 'blue'], none: ['Belum diatur', 'amber'] }
+const CHECK_STYLE = {
+  ok: ['Terhubung', 'bg-brand-50 text-brand-700'],
+  denied: ['Izin ditolak', 'bg-red-50 text-red-700'],
+  unreachable: ['Tidak terjangkau', 'bg-red-50 text-red-700'],
+  error: ['Gagal', 'bg-red-50 text-red-700'],
+  skipped: ['Dilewati', 'bg-gray-100 text-gray-500'],
+}
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -29,6 +37,11 @@ export default function SettingsPage() {
   const [scanResult, setScanResult] = useState(null)
   const [autoViewer, setAutoViewer] = useState(null)
   const [authMessage, setAuthMessage] = useState(null)
+  const [kbForm, setKbForm] = useState(null)
+  const [kbSaving, setKbSaving] = useState(false)
+  const [kbMessage, setKbMessage] = useState(null)
+  const [checking, setChecking] = useState(false)
+  const [checkResult, setCheckResult] = useState(null)
 
   useEffect(() => {
     if (data && !form) {
@@ -37,9 +50,10 @@ export default function SettingsPage() {
     }
     if (data && !dqForm) setDqForm(data.dq)
     if (data && autoViewer === null) setAutoViewer(data.auth.auto_viewer)
-  }, [data, form, dqForm, autoViewer])
+    if (data && !kbForm) setKbForm(data.kb)
+  }, [data, form, dqForm, autoViewer, kbForm])
 
-  if ((loading && !data) || !form || !dqForm) return error ? <Alert tone="error">{error.message}</Alert> : <LoadingBlock />
+  if ((loading && !data) || !form || !dqForm || !kbForm) return error ? <Alert tone="error">{error.message}</Alert> : <LoadingBlock />
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
   const setDq = (k, v) => setDqForm((f) => ({ ...f, [k]: v }))
 
@@ -56,6 +70,31 @@ export default function SettingsPage() {
       setDqSaving(false)
     }
   }
+
+  const saveKb = async () => {
+    setKbSaving(true)
+    setKbMessage(null)
+    try {
+      await api('/settings/kb', { method: 'PUT', body: { enabled: kbForm.enabled, poll_idle_seconds: kbForm.poll_idle_seconds, poll_active_seconds: kbForm.poll_active_seconds } })
+      setKbMessage({ tone: 'info', text: 'Pengaturan pemantauan Knowledge Base tersimpan (berlaku dalam beberapa detik, tanpa restart).' })
+    } catch (e) {
+      setKbMessage({ tone: 'error', text: e.message })
+    } finally {
+      setKbSaving(false)
+    }
+  }
+
+  const checkAws = async () => {
+    setChecking(true)
+    try {
+      setCheckResult(await api('/settings/aws/check', { method: 'POST' }))
+    } catch (e) {
+      setCheckResult({ error: e.message, checks: [] })
+    } finally {
+      setChecking(false)
+    }
+  }
+  const awsCheck = checkResult || data.aws.last_check
 
   const saveAuth = async (v) => {
     setAutoViewer(v)
@@ -155,6 +194,7 @@ export default function SettingsPage() {
                 </Field>
               )}
               <Toggle id="n-dq" label="Email peringatan data quality" description="Satu email ringkasan per run kalau ada peringatan DQ (kolom baru, volume menyimpang, selisih hitungan master). Run gagal: peringatan ikut di email run gagal." checked={form.on_dq_warning} onChange={(v) => set('on_dq_warning', v)} />
+              <Toggle id="n-kb" label="Email ingestion Knowledge Base bermasalah" description="Ingestion Bedrock yang gagal atau selesai dengan dokumen yang gagal diindeks (halaman Knowledge Base). Dikirim sekali per ingestion ke penerima tetap." checked={form.on_kb} onChange={(v) => set('on_kb', v)} />
               <div className="flex justify-end">
                 <Button loading={saving} onClick={save}>Simpan pengaturan</Button>
               </div>
@@ -285,6 +325,76 @@ export default function SettingsPage() {
                 </p>
               )}
               {authMessage && <Alert tone={authMessage.tone}>{authMessage.text}</Alert>}
+            </div>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <CardHeader
+              icon={Cloud}
+              title="AWS & Knowledge Base"
+              description="Koneksi Bedrock dan pemantauan ingestion (hanya membaca AWS)"
+              action={<Badge tone={AWS_MODE[data.aws.mode][1]}>{AWS_MODE[data.aws.mode][0]}</Badge>}
+            />
+            <div className="space-y-4 p-5">
+              {data.aws.mode === 'none' && (
+                <Alert tone="warning" title="Kredensial AWS belum diatur">
+                  Isi <span className="font-mono">AWS_PROFILE</span> (IAM role, disarankan di server) atau access key di <span className="font-mono">.env</span>, lalu restart web & worker.
+                </Alert>
+              )}
+              <p className="text-xs text-gray-500">
+                Region <span className="font-mono">{data.aws.region}</span>. Klien Bedrock memakai IAM role (<span className="font-mono">AWS_PROFILE</span>) lebih dulu;
+                upload bronze ke S3 tetap memakai kredensial lamanya.
+              </p>
+              <Button variant="secondary" size="sm" icon={RefreshCw} loading={checking} onClick={checkAws} className="w-full">Uji koneksi AWS</Button>
+              {awsCheck?.error && <Alert tone="error">{awsCheck.error}</Alert>}
+              {awsCheck?.checks?.length > 0 && (
+                <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200/80">
+                  {awsCheck.checks.map((c) => {
+                    const [label, classes] = CHECK_STYLE[c.status] || CHECK_STYLE.error
+                    return (
+                      <li key={c.key} className="flex items-start justify-between gap-3 px-3 py-2.5">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-800">{c.label}</p>
+                          <p className="break-words text-xs text-gray-500">{c.message}</p>
+                        </div>
+                        <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium ${classes}`}>{label}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+              {awsCheck?.at && <p className="text-xs text-gray-400">Uji terakhir {fmtDateTime(awsCheck.at)}{awsCheck.by ? ` oleh ${awsCheck.by}` : ''}.</p>}
+              <div className="space-y-4 border-t border-gray-100 pt-4">
+                <Toggle
+                  id="kb-enabled"
+                  label="Pantau ingestion Knowledge Base"
+                  description="Worker menyinkronkan riwayat ingestion semua target aktif dan mengirim email bila gagal."
+                  checked={kbForm.enabled}
+                  onChange={(v) => setKbForm((f) => ({ ...f, enabled: v }))}
+                />
+                {kbForm.enabled && (
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Jeda saat idle" htmlFor="kb-idle" hint="Detik, 60–3600.">
+                      <input id="kb-idle" type="number" min={60} max={3600} className={inputClass} value={kbForm.poll_idle_seconds} onChange={(e) => setKbForm((f) => ({ ...f, poll_idle_seconds: Number(e.target.value) }))} />
+                    </Field>
+                    <Field label="Jeda saat ada ingestion berjalan" htmlFor="kb-active" hint="Detik, 15–600.">
+                      <input id="kb-active" type="number" min={15} max={600} className={inputClass} value={kbForm.poll_active_seconds} onChange={(e) => setKbForm((f) => ({ ...f, poll_active_seconds: Number(e.target.value) }))} />
+                    </Field>
+                  </div>
+                )}
+                {data.kb.last_poll_at && (
+                  <p className="text-xs text-gray-500">
+                    Sinkron terakhir {fmtRelative(data.kb.last_poll_at)}
+                    {data.kb.last_result ? `: ${data.kb.last_result.ok} dari ${data.kb.last_result.targets} target berhasil.` : '.'}
+                  </p>
+                )}
+                {data.kb.last_result?.error && <Alert tone="error">{data.kb.last_result.error}</Alert>}
+                {kbMessage && <Alert tone={kbMessage.tone}>{kbMessage.text}</Alert>}
+                <div className="flex items-center justify-between gap-3">
+                  <Link to="/kb" className="text-sm font-medium text-brand-700 hover:underline">Buka Knowledge Base</Link>
+                  <Button loading={kbSaving} onClick={saveKb}>Simpan</Button>
+                </div>
+              </div>
             </div>
           </Card>
 

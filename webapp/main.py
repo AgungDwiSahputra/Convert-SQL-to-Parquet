@@ -26,8 +26,8 @@ from pipeline import run_store
 from pipeline.config import BASE_PATH
 from pipeline.job_store import init_db
 from webapp import (
-    routes_adhoc, routes_auth, routes_dashboard, routes_jobs, routes_runs, routes_schedules, routes_schema, routes_settings,
-    routes_users,
+    routes_adhoc, routes_auth, routes_dashboard, routes_jobs, routes_kb, routes_runs, routes_schedules, routes_schema,
+    routes_settings, routes_users,
 )
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -63,6 +63,7 @@ app.include_router(routes_schedules.router, prefix=f"{API}/schedules", tags=["sc
 app.include_router(routes_adhoc.router, prefix=f"{API}/adhoc", tags=["adhoc"])
 app.include_router(routes_settings.router, prefix=f"{API}/settings", tags=["settings"])
 app.include_router(routes_dashboard.router, prefix=f"{API}/dashboard", tags=["dashboard"])
+app.include_router(routes_kb.router, prefix=f"{API}/kb", tags=["kb"])
 
 
 @app.get(f"{API}/health", tags=["health"])

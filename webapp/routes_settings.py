@@ -11,10 +11,11 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from pipeline import maintenance, notify, s3_inventory
+from pipeline import aws, kb_sync, maintenance, notify, s3_inventory
 from pipeline.app_settings import get_settings, set_settings
-from pipeline.config import APP_BASE_URL, BACKUP_KEEP, LOG_RETENTION_DAYS, SMTP_SECURITY
+from pipeline.config import APP_BASE_URL, AWS_REGION, BACKUP_KEEP, LOG_RETENTION_DAYS, SMTP_SECURITY
 from pipeline.export import make_s3_client
+from pipeline.job_store import utc_now
 from webapp.deps import get_db, require_role
 
 router = APIRouter()
@@ -25,6 +26,7 @@ class NotifyIn(BaseModel):
     on_failed: bool = True
     on_anomaly: bool = True
     on_dq_warning: bool = True
+    on_kb: bool = True
     notify_creator: bool = True
     anomaly_streak: int = Field(3, ge=2, le=14)
 
@@ -42,6 +44,12 @@ class DqIn(BaseModel):
     s3inv_scan_time: str = Field("05:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
+class KbIn(BaseModel):
+    enabled: bool = True
+    poll_idle_seconds: int = Field(300, ge=60, le=3600)
+    poll_active_seconds: int = Field(45, ge=15, le=600)
+
+
 class AuthIn(BaseModel):
     auto_viewer: bool = True
 
@@ -54,11 +62,12 @@ class TestEmailIn(BaseModel):
 def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
     s = get_settings(db, "notify.")
     d = get_settings(db, "dq.") | get_settings(db, "freshness.") | get_settings(db, "s3inv.")
+    k = get_settings(db, "kb.") | get_settings(db, "aws.")
     rows = db.execute("SELECT * FROM notifications ORDER BY id DESC LIMIT 30").fetchall()
     return {
         "notify": {"recipients": s["notify.recipients"], "on_failed": s["notify.on_failed"],
                    "on_anomaly": s["notify.on_anomaly"], "on_dq_warning": s["notify.on_dq_warning"],
-                   "notify_creator": s["notify.notify_creator"],
+                   "on_kb": s["notify.on_kb"], "notify_creator": s["notify.notify_creator"],
                    "anomaly_streak": s["notify.anomaly_streak"]},
         "dq": {"volume_low_pct": d["dq.volume_low_pct"], "volume_high_pct": d["dq.volume_high_pct"],
                "volume_min_history": d["dq.volume_min_history"], "gap_days": d["dq.gap_days"],
@@ -73,6 +82,11 @@ def get_all(_admin: dict = Depends(require_role("admin")), db: sqlite3.Connectio
         "auth": {"auto_viewer": get_settings(db, "auth.")["auth.auto_viewer"],
                  "pending_export": db.execute("SELECT COUNT(*) FROM users WHERE role = 'viewer' AND active = 1 "
                                               "AND can_export = 0").fetchone()[0]},
+        "kb": {"enabled": k["kb.enabled"], "poll_idle_seconds": k["kb.poll_idle_seconds"],
+               "poll_active_seconds": k["kb.poll_active_seconds"], "last_poll_at": k["kb.last_poll_at"],
+               "last_result": k["kb.last_result"]},
+        # Hanya mode & hasil uji -- profile/ARN role dan access key tidak pernah ditampilkan.
+        "aws": {"mode": aws.auth_mode(), "region": AWS_REGION, "last_check": k["aws.last_check"]},
         "app_base_url": APP_BASE_URL,
         "maintenance": {"last": maintenance.last_result(db), "backup_keep": BACKUP_KEEP,
                         "log_retention_days": LOG_RETENTION_DAYS},
@@ -89,7 +103,7 @@ def save_notify(body: NotifyIn, admin: dict = Depends(require_role("admin")), db
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Alamat email tidak valid: {', '.join(bad)}")
     set_settings(db, {"notify.recipients": recipients, "notify.on_failed": body.on_failed,
                       "notify.on_anomaly": body.on_anomaly, "notify.on_dq_warning": body.on_dq_warning,
-                      "notify.notify_creator": body.notify_creator,
+                      "notify.on_kb": body.on_kb, "notify.notify_creator": body.notify_creator,
                       "notify.anomaly_streak": body.anomaly_streak}, admin["username"])
     return {"ok": True, "recipients": recipients}
 
@@ -103,6 +117,22 @@ def save_dq(body: DqIn, admin: dict = Depends(require_role("admin")), db: sqlite
                       "freshness.check_time": body.freshness_check_time, "s3inv.enabled": body.s3inv_enabled,
                       "s3inv.scan_time": body.s3inv_scan_time}, admin["username"])
     return {"ok": True}
+
+
+@router.put("/kb")
+def save_kb(body: KbIn, admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
+    set_settings(db, {"kb.enabled": body.enabled, "kb.poll_idle_seconds": body.poll_idle_seconds,
+                      "kb.poll_active_seconds": body.poll_active_seconds}, admin["username"])
+    return {"ok": True}
+
+
+@router.post("/aws/check")
+def check_aws(admin: dict = Depends(require_role("admin")), db: sqlite3.Connection = Depends(get_db)):
+    """Uji koneksi AWS (kredensial, Bedrock KB, S3 jalur dokumen). Hanya membaca; beberapa detik."""
+    kb_ids = sorted({t["knowledge_base_id"] for t in kb_sync.list_targets(db, enabled_only=True)})
+    result = {"at": utc_now(), "by": admin["username"], "mode": aws.auth_mode(), "checks": aws.check_connections(kb_ids)}
+    set_settings(db, {"aws.last_check": result}, admin["username"])
+    return result
 
 
 @router.put("/auth")

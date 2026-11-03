@@ -60,6 +60,11 @@ S3_CONFIGURED = bool(S3_BUCKET_NAME and ((AWS_ACCESS_KEY_ID and AWS_SECRET_ACCES
 # Segmen paling luar S3 key, DI ATAS layer. "" = bronze/silver/gold langsung di root
 # bucket. Mengubahnya memindahkan path SEMUA job -- jangan diubah tanpa alasan kuat.
 S3_PREFIX = os.environ.get("S3_PREFIX", "")
+# Prefix jalur dokumen unstructured (rclone -> Glue cleansing -> Knowledge Base) di bucket yang SAMA. Di luar S3_PREFIX
+# (jalur dokumen tidak mengikuti layout bronze/silver/gold). Hanya DIBACA/LIST oleh pipeline/kb_sync.py -- tidak pernah ditulis.
+KB_DOCS_PREFIX = os.environ.get("KB_DOCS_PREFIX", "documents/").strip().lstrip("/")
+if KB_DOCS_PREFIX and not KB_DOCS_PREFIX.endswith("/"):
+    KB_DOCS_PREFIX += "/"
 
 # --- Web UI (webapp/) ---
 # Base URL SSO portal, mis. https://<host>/portalpage -- endpoint /api/auth/gettoken & /api/cor/user.

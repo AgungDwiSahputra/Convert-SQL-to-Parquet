@@ -8,6 +8,7 @@ Tabel:
   sessions   : session login Web UI.                                     (skema v2)
   runs       : run yang diantrikan dari Web UI (lihat run_store.py).     (skema v2)
   run_items  : rincian run: satu baris = satu job x satu tanggal.        (skema v2)
+  kb_targets / kb_ingestions : target & riwayat ingestion Bedrock Knowledge Base.   (skema v12)
 
 File database sengaja masuk .gitignore -- isinya query/nama tabel/S3 key nyata milik
 environment ini (alasan yang sama dengan jobs.py).
@@ -306,6 +307,51 @@ CREATE TABLE s3_inventory (
     # Ekspor Cepat; akun daftar otomatis diisi 0 sampai admin menyetujui (operator+ tidak bergantung kolom ini).
     """
 ALTER TABLE users ADD COLUMN can_export INTEGER NOT NULL DEFAULT 1;
+""",
+    # v12 -- Fase 10: pemantauan & sync manual Bedrock Knowledge Base (pipeline/kb_sync.py). TERPISAH dari jobs/runs:
+    # target KB bukan job SQL, jadi tidak lewat exporter/worker jalur ekspor. kb_ingestions = cermin ListIngestionJobs
+    # (juga ingestion yang dimulai job Glue atau console), BUKAN antrian eksekusi.
+    """
+CREATE TABLE kb_targets (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT    NOT NULL UNIQUE,   -- kunci pendek (huruf kecil), mis. wm / hc_sop / few_shot
+    title             TEXT,                      -- label tampilan, mis. wm-documents
+    knowledge_base_id TEXT    NOT NULL,
+    data_source_id    TEXT    NOT NULL,
+    source_prefix     TEXT,                      -- prefix S3 sumber, dibaca dari konfigurasi data source Bedrock
+    pipeline          TEXT    NOT NULL DEFAULT 'manual' CHECK (pipeline IN ('documents', 'manual')),
+                                                 -- documents = jalur rclone -> Glue cleansing (kesegaran 3 tahap)
+    dataset           TEXT,                      -- folder dataset di documents/.../v2/<dataset>/ (pipeline = documents)
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    notes             TEXT,
+    polled_at         TEXT,                      -- terakhir riwayat ingestion berhasil disinkronkan
+    poll_error        TEXT,                      -- pesan aplikasi (bukan pesan asli AWS) kalau sinkron terakhir gagal
+    created_by        TEXT,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL,
+    UNIQUE (knowledge_base_id, data_source_id)
+);
+CREATE TABLE kb_ingestions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id        INTEGER NOT NULL REFERENCES kb_targets(id) ON DELETE CASCADE,
+    ingestion_job_id TEXT    NOT NULL,
+    status           TEXT    NOT NULL,           -- STARTING | IN_PROGRESS | COMPLETE | FAILED | STOPPING | STOPPED
+    started_at       TEXT,                       -- UTC ISO, dari Bedrock
+    updated_at       TEXT,
+    scanned          INTEGER,
+    new_indexed      INTEGER,
+    modified_indexed INTEGER,
+    deleted          INTEGER,
+    failed           INTEGER,
+    failure_reasons  TEXT,                       -- JSON daftar alasan (GetIngestionJob), hanya bila gagal
+    description      TEXT,
+    origin           TEXT    NOT NULL DEFAULT 'external' CHECK (origin IN ('app', 'glue', 'external')),
+    started_by       TEXT,                       -- username, hanya origin = app
+    notified_at      TEXT,                       -- kapan email gagal/dokumen gagal diproses (sekali per ingestion)
+    synced_at        TEXT    NOT NULL,
+    UNIQUE (target_id, ingestion_job_id)
+);
+CREATE INDEX ix_kb_ingestions_target ON kb_ingestions (target_id, started_at);
 """,
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)

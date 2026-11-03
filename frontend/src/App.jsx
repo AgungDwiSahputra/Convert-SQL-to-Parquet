@@ -9,6 +9,8 @@ import SettingsPage from './pages/SettingsPage'
 import JobDetailPage from './pages/JobDetailPage'
 import JobFormPage from './pages/JobFormPage'
 import JobsPage from './pages/JobsPage'
+import KnowledgeBaseDetailPage from './pages/KnowledgeBaseDetailPage'
+import KnowledgeBasePage from './pages/KnowledgeBasePage'
 import LoginPage from './pages/LoginPage'
 import NewRunPage from './pages/NewRunPage'
 import RunDetailPage from './pages/RunDetailPage'
@@ -48,6 +50,8 @@ export default function App() {
         <Route path="jobs/:name" element={<JobDetailPage />} />
         <Route path="jobs/:name/edit" element={<RequireRole role="operator"><JobFormPage key="edit" /></RequireRole>} />
         <Route path="schedules" element={<SchedulesPage />} />
+        <Route path="kb" element={<KnowledgeBasePage />} />
+        <Route path="kb/:id" element={<KnowledgeBaseDetailPage />} />
         <Route path="export" element={<AdhocPage />} />
         <Route path="users" element={<RequireRole role="admin"><UsersPage /></RequireRole>} />
         <Route path="settings" element={<RequireRole role="admin"><SettingsPage /></RequireRole>} />

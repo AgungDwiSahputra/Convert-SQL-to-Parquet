@@ -1,6 +1,6 @@
 """
 Cek jaringan dari mesin / container ini ke semua layanan yang dipakai aplikasi: DNS + koneksi TCP
-ke SQL Server, portal SSO, SMTP, dan S3 (+ STS & endpoint metadata EC2 kalau memakai IAM role lewat
+ke SQL Server, portal SSO, SMTP, S3, dan Bedrock Knowledge Base (+ STS & endpoint metadata EC2 kalau memakai IAM role lewat
 AWS_PROFILE). Tidak login dan tidak menampilkan kredensial -- hanya nama host, IP hasil resolve, dan
 berhasil/tidaknya koneksi. Host dibaca dari environment / .env.
 
@@ -66,6 +66,7 @@ def main() -> int:
         ("Portal SSO (SSO_BASE_URL)", url_target(os.environ.get("SSO_BASE_URL", ""))),
         ("SMTP (SMTP_HOST)", (smtp_host, int(os.environ.get("SMTP_PORT", "587"))) if smtp_host else None),
         ("S3 (AWS_REGION)", (f"s3.{region}.amazonaws.com", 443)),
+        ("Bedrock Knowledge Base (bedrock-agent, AWS_REGION)", (f"bedrock-agent.{region}.amazonaws.com", 443)),
     ]
     if os.environ.get("AWS_PROFILE", "").strip():   # IAM role: kredensial instance dari metadata, lalu assume role
         metadata = os.environ.get("AWS_EC2_METADATA_SERVICE_ENDPOINT", "").strip() or "http://169.254.169.254"

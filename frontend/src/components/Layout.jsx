@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router'
-import { CalendarClock, Database, Download, History, LayoutDashboard, LogOut, Menu, Play, Settings, Users, X } from 'lucide-react'
+import { BookOpen, CalendarClock, Database, Download, History, LayoutDashboard, LogOut, Menu, Play, Settings, Users, X } from 'lucide-react'
 import { ROLE_LABEL, hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 
@@ -10,6 +10,7 @@ const NAV = [
   { to: '/runs', label: 'Riwayat Run', icon: History, match: (p) => p.startsWith('/runs') && p !== '/runs/new' },
   { to: '/schedules', label: 'Jadwal', icon: CalendarClock, match: (p) => p.startsWith('/schedules') },
   { to: '/jobs', label: 'Daftar Job', icon: Database, match: (p) => p.startsWith('/jobs') },
+  { to: '/kb', label: 'Knowledge Base', icon: BookOpen, match: (p) => p.startsWith('/kb') },
   { to: '/export', label: 'Ekspor Cepat', icon: Download, match: (p) => p.startsWith('/export') },
   { section: 'Admin', role: 'admin' },
   { to: '/users', label: 'Users', icon: Users, role: 'admin', match: (p) => p.startsWith('/users') },

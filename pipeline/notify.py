@@ -485,6 +485,26 @@ def notify_stale(conn: sqlite3.Connection, result: dict) -> None:
           job_names=sorted({f["job_name"] for f in late} | {g["job_name"] for g in gaps}))
 
 
+def notify_kb_ingestions(conn: sqlite3.Connection, target: dict, rows: list[tuple]) -> None:
+    """
+    Email ingestion Knowledge Base yang gagal / selesai dengan dokumen gagal diindeks (pipeline/kb_sync.py).
+    rows = [(waktu mulai, masalah, statistik, alasan)]. Penerima = penerima tetap; gate saklar notify.on_kb.
+    """
+    settings = get_settings(conn, "notify.")
+    if not settings["notify.on_kb"] or not rows:
+        return
+    label = target.get("title") or target["name"]
+    n = len(rows)
+    subject = f"{SUBJECT_PREFIX} Knowledge Base {label}: {n} ingestion bermasalah"
+    intro = (f"Sinkron Knowledge Base \"{label}\" mencatat {n} ingestion yang gagal atau berakhir dengan dokumen yang "
+             f"gagal diindeks. Dokumen yang gagal tidak bisa dijawab oleh AI sampai ingestion berikutnya berhasil. "
+             f"Periksa alasan di bawah dan riwayat lengkapnya di aplikasi.")
+    facts = [("Knowledge Base", label), ("Sumber", target.get("source_prefix") or "-"), ("Ingestion bermasalah", str(n))]
+    _send(conn, "kb_ingestion", settings["notify.recipients"], subject, "Ingestion Knowledge Base bermasalah", intro,
+          rows=rows, headers=("Mulai", "Masalah", "Statistik", "Alasan"), badge_col=1, link=_link(f"/kb/{target['id']}"),
+          link_label="Buka Knowledge Base", tone="danger", facts=facts)
+
+
 def send_test(conn: sqlite3.Connection, to: str, by: str) -> tuple[str, str | None]:
     subject = f"{SUBJECT_PREFIX} Email uji"
     intro = "Kalau Anda membaca email ini, setelan SMTP sudah benar dan notifikasi monitoring siap dikirim."

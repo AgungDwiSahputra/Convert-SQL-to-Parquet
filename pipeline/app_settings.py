@@ -31,6 +31,14 @@ DEFAULTS = {
     "s3inv.scan_time": "05:30",     # jam (WIB) pindai harian -- sebelum penjaga kesegaran
     "s3inv.last_date": None,        # tanggal (WIB) pindai harian terakhir
     "s3inv.last_result": None,      # ringkasan pindai terakhir (harian / manual)
+    "notify.on_kb": True,           # email saat ingestion Knowledge Base gagal / ada dokumen gagal diindeks (pipeline/kb_sync.py)
+    "kb.enabled": True,             # pantau ingestion Knowledge Base (worker) -- hanya membaca AWS
+    "kb.poll_idle_seconds": 300,    # jeda sinkron riwayat ingestion saat tidak ada yang berjalan
+    "kb.poll_active_seconds": 45,   # jeda saat ada ingestion yang masih berjalan
+    "kb.active": False,             # ada ingestion berjalan pada sinkron terakhir (menentukan jeda di atas)
+    "kb.last_poll_at": None,        # waktu (UTC) siklus sinkron terakhir dimulai
+    "kb.last_result": None,         # ringkasan siklus sinkron terakhir
+    "aws.last_check": None,         # hasil "Uji koneksi AWS" terakhir (Pengaturan)
     "auth.auto_viewer": True,       # akun SSO yang belum terdaftar otomatis masuk sebagai Viewer (Ekspor Cepat menunggu admin)
     "maintenance.last_date": None,  # tanggal (WIB) pemeliharaan harian terakhir
 }

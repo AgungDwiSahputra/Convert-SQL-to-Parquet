@@ -8,8 +8,8 @@ produksi terkendali. Dua run yang memakai job yang sama tidak pernah berjalan be
 walaupun worker dijalankan lebih dari satu (lihat run_store.claim_next_run).
 
 Selain itu worker menjalankan thread SCHEDULER (scheduler.py): jadwal yang jatuh tempo diubah
-menjadi run di antrian, plus pemeliharaan harian (maintenance.py), inventaris S3 (s3_inventory.py), dan
-penjaga kesegaran (freshness.py). Thread terpisah supaya jadwal
+menjadi run di antrian, plus pemeliharaan harian (maintenance.py), inventaris S3 (s3_inventory.py),
+penjaga kesegaran (freshness.py), dan pemantauan ingestion Bedrock Knowledge Base (kb_sync.py). Thread terpisah supaya jadwal
 tetap tepat waktu walaupun loop utama sedang mengerjakan run yang panjang. Setelah run selesai,
 notifikasi email dikirim (notify.py) -- gagal kirim tidak memengaruhi status run.
 
@@ -30,7 +30,7 @@ import time
 
 import pyodbc
 
-from pipeline import dq, freshness, maintenance, notify, run_store, s3_inventory, scheduler
+from pipeline import dq, freshness, kb_sync, maintenance, notify, run_store, s3_inventory, scheduler
 from pipeline.config import CONN_STR
 from pipeline.export import LOG_DATEFMT, LOG_FORMAT, log, make_s3_client, run_job, setup_logging
 from pipeline.job_store import JobStoreError, init_db, mark_s3_uploaded
@@ -70,6 +70,15 @@ def scheduler_round(db) -> None:
                     "Pemeriksaan kesegaran: %s dari %s job aktif belum segar (terlambat / belum ada data).", len(result["late"]), result["checked"])
     except Exception:  # noqa: BLE001
         log.exception("Pemeriksaan kesegaran gagal.")
+    try:
+        result = kb_sync.run_cycle(db)
+        if result and (result["error"] or result["errors"]):
+            log.warning("Pemantauan Knowledge Base: %s dari %s target gagal. %s", len(result["errors"]) or result["targets"],
+                        result["targets"], result["error"] or "; ".join(f"{e['target']}: {e['error']}" for e in result["errors"]))
+        elif result and result["notified"]:
+            log.warning("Pemantauan Knowledge Base: %s ingestion bermasalah dilaporkan lewat email.", result["notified"])
+    except Exception:  # noqa: BLE001
+        log.exception("Pemantauan Knowledge Base gagal.")
 
 
 class _Scheduler(threading.Thread):

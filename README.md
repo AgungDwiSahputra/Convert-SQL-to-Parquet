@@ -52,6 +52,8 @@ LoadParquetProcess/
 | `pipeline/config.py` | Koneksi, batch, kompresi, path, setelan — semua dari `.env` | Setelan global |
 | `pipeline/run_store.py`, `scheduler.py`, `notify.py`, `maintenance.py`, `app_settings.py` | Antrian & riwayat run, jadwal, email, backup & bersih log, setelan non-rahasia | Fitur operasional |
 | `pipeline/freshness.py` | Kesegaran data per job + penjaga harian (§10) | Aturan kesegaran berubah |
+| `pipeline/aws.py` | Klien AWS terpusat untuk integrasi BARU (Bedrock, S3 baca dokumen): IAM role dulu, penerjemah error, uji koneksi (§12) | Layanan AWS baru |
+| `pipeline/kb_sync.py` | Target & riwayat ingestion Bedrock Knowledge Base, siklus pemantauan worker (§12) | Aturan pemantauan KB berubah |
 | `webapp/` | `main.py` (app, SPA, kunci MIME), `routes_*.py` per kelompok API, `catalog.py` (metadata SQL Server, uji coba, ekspor cepat) | Fitur Web UI |
 | `frontend/` | React 19 + Tailwind 4 + React Router 7 (Vite) | Tampilan |
 
@@ -367,8 +369,8 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   grafik dari `GET /api/dashboard` (`dq_results`, hasil terbaru per job+tanggal — run ulang yang sukses
   menutup masalah lama); kesegaran & celah dari `/api/jobs`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
-  `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`, `master_snapshots`, `s3_inventory`. Dinaikkan otomatis saat web, worker, atau
-  CLI start.
+  `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`, `master_snapshots`, `s3_inventory`,
+  `kb_targets`, `kb_ingestions`. Dinaikkan otomatis saat web, worker, atau CLI start.
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
   `frontend/src/index.css` (palet hijau, mode terang). Dokumentasi API: `/api/docs`.
@@ -509,6 +511,8 @@ terlihat di sini.
 - **Anomali 0 baris** — job berirama **harian** yang biasanya berisi data tapi N tanggal terakhir
   (default 3) kosong; sekali per kejadian. Job mingguan/bulanan tidak ikut (wajar kosong di hari biasa).
 - **Data belum segar** — hasil penjaga kesegaran harian (kalau diaktifkan), ke penerima tetap.
+- **Ingestion Knowledge Base bermasalah** — ingestion Bedrock yang gagal atau selesai dengan dokumen gagal diindeks,
+  sekali per ingestion, ke penerima tetap (saklar tersendiri; §12).
 - Penerima = daftar tetap + pembuat run. Akun SMTP hanya di `.env` (`SMTP_*`); isi `APP_BASE_URL`
   supaya email berisi link.
 - Nama pengirim = `SMTP_FROM_NAME` (default "Monitoring Parquet Exporter"; alamatnya tetap `SMTP_FROM`).
@@ -709,3 +713,52 @@ proxy HTTPS (IIS URL Rewrite + ARR, atau nginx) di depan uvicorn, set `COOKIE_SE
 `APP_BASE_URL=https://…`. Di Docker, HTTPS diurus AWS di depan gateway (subbagian di atas). Tanpa Docker, jalankan web dengan `WEB_HOST=127.0.0.1` supaya hanya proxy
 yang bisa mengaksesnya; uvicorn memakai header `X-Forwarded-*` dari 127.0.0.1, jadi IP klien untuk
 batas percobaan login tetap benar.
+
+## 12. Knowledge Base (Bedrock) — Fase 10
+
+Halaman **Knowledge Base** memantau ingestion Amazon Bedrock Knowledge Base. Rencana lengkap: PRD v1.1 (`docs/`, bab 8.7).
+
+**Jalur dokumen** (di luar aplikasi, terverifikasi 3 Nov 2026): rclone di host GIS04 (Task Scheduler, 00:01) menyalin
+dokumen Google Drive ke `documents/raw/` → job Glue *documents cleansing and chunking* (03:00 WIB, satu run per dataset:
+`wm`, `hc_sop`, `agronomy_sop`) menulis hasilnya ke `documents/knowledge-base-preparation/v2/<dataset>/kb/` plus
+laporan run (`reports/`) dan state (`state/`) → **job Glue yang sama memulai ingestion** Bedrock saat ada dokumen berubah
+(`state/glue/ingestion/<dataset>.json` memuat `job_id`-nya). KB `few-shot-sql` (`few_shots/kb/`) tidak lewat jalur ini
+(ingestion manual).
+
+**Yang dikerjakan aplikasi** — hanya MEMBACA AWS; **tidak memulai ingestion** (pemicu kedua berisiko ditolak Bedrock atau
+memboroskan biaya embedding; sync manual menyusul sebagai irisan terpisah):
+- *Target* (`kb_targets`): pasangan Knowledge Base ID + Data Source ID yang didaftarkan admin (divalidasi ke Bedrock lewat
+  `GetKnowledgeBase`/`GetDataSource`; prefix S3 sumber dibaca dari konfigurasi data source). Nama bucket tidak pernah dikirim ke UI.
+- *Riwayat* (`kb_ingestions`): cermin `ListIngestionJobs` (30 terbaru per target) — termasuk ingestion yang dimulai job Glue
+  atau console. Alasan gagal dari `GetIngestionJob`. `origin`: `external` (default), `app`/`glue` disiapkan untuk irisan berikutnya.
+- *Siklus worker* (`kb_sync.run_cycle`, di thread scheduler): jeda `kb.poll_idle_seconds` (300) atau `kb.poll_active_seconds` (45)
+  bila ada ingestion berjalan. Sinkron PERTAMA target tidak mengirim email (riwayat lama bukan kejadian baru). Ingestion `FAILED`
+  atau `COMPLETE` dengan dokumen gagal → satu email ringkasan (`notify.notify_kb_ingestions`, saklar `notify.on_kb`).
+  Error kredensial/jaringan menghentikan siklus; izin ditolak dicatat per target (`kb_targets.poll_error`).
+- Kesehatan target (`kb_sync.health_of`): sehat / berjalan / ada dokumen gagal / gagal / dihentikan / belum ada ingestion.
+
+**Kredensial — aturan beda dari S3 bronze** (`pipeline/aws.py`): klien Bedrock & S3-baca-dokumen memakai `AWS_PROFILE` (IAM role)
+**lebih dulu**; access key hanya kalau `AWS_PROFILE` kosong. Klien S3 bronze (`export.make_s3_client`) tidak berubah: access key
+menang. Akibatnya role GIS04 bisa dipakai untuk Knowledge Base walau belum punya `PutObject`/`DeleteObject` `bronze/*`. Setelah izin itu
+ditambahkan, hapus access key dari `.env` dan semuanya pindah ke role. Profile hasil `aws login` (PC dev) butuh `pip install "botocore[crt]"`
+(tidak di `requirements.txt`; server memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/check_network.py`.
+
+**Izin IAM** yang dipakai (policy `svc-kpn-ai-policy`): `bedrock:GetKnowledgeBase`, `GetDataSource`, `ListDataSources`,
+`ListIngestionJobs`, `GetIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen, irisan berikutnya).
+`ListKnowledgeBases` tidak ada → Knowledge Base ID diketik manual. Membaca isi `reports/` & `state/` jalur dokumen butuh
+`s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy; diminta ke Tim CDT).
+
+**Akses**: viewer melihat; operator memuat ulang riwayat; admin mendaftarkan/mengubah/menghapus target dan mengatur
+pemantauan (Pengaturan → AWS & Knowledge Base). API: `/api/kb` (`routes_kb.py`). Pesan error AWS ke UI = pesan sendiri per kode
+error (`aws.error_message`), bukan pesan asli AWS (memuat ARN role, nomor akun, nama bucket).
+
+**Cara menguji.** IAM role GIS04 memakai `credential_source = Ec2InstanceMetadata` (README §11): hanya bisa dipinjam di server EC2
+itu. Di PC dev, profile `monitoring-datas` di `.env` menunjuk `AWS_CONFIG_FILE=C:/aws/config` — path DI DALAM container, jadi di PC muncul
+"Profile AWS_PROFILE tidak ada" (pesan wajar, bukan bug). Dua tingkat uji:
+1. **PC dev** — logika & bentuk API Bedrock: uji dengan klien palsu, atau identitas dev (`aws login --profile <profile dev>`, lalu
+   `AWS_PROFILE=<profile dev>` hanya untuk proses uji; butuh `botocore[crt]`). Izin identitas dev berbeda dari role server.
+2. **GIS04** — izin role sesungguhnya: `check_network.py`, Pengaturan → Uji koneksi AWS, lalu daftarkan Knowledge Base (semua panggilan
+   read-only). Backup `jobs.db` sebelum deploy (migrasi v12 otomatis).
+
+**Belum dikerjakan** (PRD v1.1): kesegaran tiga tahap jalur dokumen (`raw/` → `v2/` → KB) + peringatan "ingestion tertunda"
+(`s3:ListBucket` cukup), atribusi "Glue (otomatis)", sync manual (`StartIngestionJob`, lewat antrian worker), ringkasan laporan Glue.
