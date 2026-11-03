@@ -53,6 +53,8 @@ export function originInfo(i) {
 }
 // Tahap jalur dokumen (pipeline/kb_pipeline): status Glue & KB.
 const GLUE_STAGE = {
+  running: ['Glue berproses', 'bg-blue-50 text-blue-700'],
+  failed: ['Glue gagal', 'bg-red-50 text-red-700'],
   ok: ['Glue segar', 'bg-brand-50 text-brand-700'],
   waiting: ['Glue menunggu', 'bg-gray-100 text-gray-600'],
   late: ['Glue terlambat', 'bg-red-50 text-red-700'],

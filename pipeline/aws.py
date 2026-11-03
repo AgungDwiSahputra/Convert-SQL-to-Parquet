@@ -95,6 +95,7 @@ _MESSAGES = {
     "MissingDependencyException": "Profile ini butuh paket botocore[crt] (hanya untuk mesin dev; server memakai role).",
     "AwsNotConfigured": "AWS_PROFILE (IAM role) atau access key belum diisi di .env server.",
     "ResourceNotFoundException": "Knowledge Base atau data source tidak ditemukan (periksa ID-nya).",
+    "EntityNotFoundException": "Job Glue tidak ditemukan (periksa pola nama job di Pengaturan).",
     "NoSuchBucket": "Bucket S3 di .env tidak ditemukan.",
     "NoSuchKey": "Objek S3 tidak ditemukan.",
     "ThrottlingException": "AWS membatasi permintaan (throttling); akan dicoba lagi otomatis.",
@@ -146,8 +147,10 @@ def check_connections(kb_ids: list[str]) -> list[dict]:
     if not configured():
         msg = "AWS_PROFILE (IAM role) atau access key belum diisi di .env server."
         return [{"key": k, "label": lb, "status": "error", "message": msg}
-                for k, lb in (("credentials", "Kredensial AWS"), ("bedrock", "Bedrock Knowledge Base"), ("s3_docs", "S3 jalur dokumen"))]
+                for k, lb in (("credentials", "Kredensial AWS"), ("bedrock", "Bedrock Knowledge Base"),
+                              ("glue", "Glue (status run)"), ("s3_docs", "S3 jalur dokumen"))]
     out = [_probe("credentials", "Kredensial AWS", lambda: client("sts").get_caller_identity() and f"Valid (mode {auth_mode()}).")]
+    glue_probe = _probe("glue", "Glue (status run)", lambda: client("glue").get_jobs(MaxResults=1) and "Terhubung.")
     if kb_ids:
         results = [_probe("bedrock", "Bedrock Knowledge Base", lambda kb=kb: client("bedrock-agent").get_knowledge_base(
             knowledgeBaseId=kb) and "Terhubung.") for kb in kb_ids[:3]]
@@ -162,4 +165,5 @@ def check_connections(kb_ids: list[str]) -> list[dict]:
     else:
         out.append({"key": "s3_docs", "label": "S3 jalur dokumen", "status": "skipped",
                     "message": "S3_BUCKET_NAME belum diisi di .env."})
+    out.insert(2, glue_probe)
     return out

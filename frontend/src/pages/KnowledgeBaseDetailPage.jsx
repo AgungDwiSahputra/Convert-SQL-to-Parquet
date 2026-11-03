@@ -95,6 +95,9 @@ function FlowCard({ flow, raw }) {
     <Card className="overflow-hidden">
       <CardHeader title="Jalur dokumen" description="rclone → Glue cleansing → ingestion Knowledge Base · dibaca dari S3 (hanya daftar objek)" />
       {flow.error && <div className="px-5 pt-4"><Alert tone="warning" title="Sebagian status tidak dapat dibaca">{flow.error}</Alert></div>}
+      {flow.stale && flow.checked_at && (
+        <div className="px-5 pt-4"><Alert tone="warning" title="Status belum diperbarui">Terakhir diperiksa {fmtRelative(flow.checked_at)}. Pastikan worker berjalan; status “berproses” tidak ditampilkan dari data yang sudah basi.</Alert></div>
+      )}
       <ul className="divide-y divide-gray-100">
         <li className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
@@ -111,11 +114,21 @@ function FlowCard({ flow, raw }) {
             <p className="text-sm font-medium text-gray-800">2 · Cleansing Glue</p>
             {g ? (
               <>
+                {g.status === 'running' && g.run && (
+                  <p className="mt-0.5 text-xs font-medium text-blue-700">
+                    Run Glue sedang berjalan sejak {fmtDateTime(g.run.started_at)} ({fmtDuration((Date.now() - new Date(g.run.started_at).getTime()) / 1000)}) — ingestion dimulai Glue di akhir run.
+                  </p>
+                )}
+                {g.status === 'failed' && g.run && (
+                  <p className="mt-0.5 text-xs font-medium text-red-600">Run Glue terakhir {g.run.state} (mulai {fmtDateTime(g.run.started_at)}) — periksa job di Glue console.</p>
+                )}
                 <p className="mt-0.5 text-xs text-gray-500">Laporan run terakhir selesai {g.last_report_at ? fmtDateTime(g.last_report_at) : '–'}</p>
                 <p className="mt-0.5 text-xs text-gray-400">
                   Jadwal {sched.run_time} WIB · batas lapor {sched.deadline} WIB
-                  {g.status === 'late' && <span className="text-red-600"> · belum ada laporan sesudah jadwal {fmtDateTime(g.expected_run_at)}</span>}
+                  {g.report_status === 'late' && <span className="text-red-600"> · belum ada laporan sesudah jadwal {fmtDateTime(g.expected_run_at)}</span>}
                 </p>
+                <p className="mt-0.5 font-mono text-[11px] text-gray-400">Job Glue: {sched.glue_job}</p>
+                {flow.glue_error && <p className="mt-0.5 text-xs text-amber-700">Status run Glue tidak terbaca ({flow.glue_error}) — status dinilai dari laporan saja.</p>}
               </>
             ) : <p className="mt-0.5 text-xs text-gray-400">Belum diperiksa.</p>}
           </div>
@@ -131,6 +144,9 @@ function FlowCard({ flow, raw }) {
                   Dianggap tertunda bila tidak ada ingestion sesudah perubahan selama {sched.pending_minutes} menit
                   {k.status === 'pending' && <span className="text-red-600"> · belum ada ingestion sejak perubahan itu</span>}
                 </p>
+                {k.status === 'waiting' && g?.status === 'running' && (
+                  <p className="mt-0.5 text-xs font-medium text-blue-700">Menunggu run Glue selesai — Glue memulai ingestion di akhir run.</p>
+                )}
               </>
             ) : <p className="mt-0.5 text-xs text-gray-400">Belum diperiksa.</p>}
           </div>

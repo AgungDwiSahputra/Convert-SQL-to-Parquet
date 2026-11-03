@@ -16,6 +16,11 @@ Atribusi asal ingestion: ingestion yang selesai-laporannya 0-30 detik sesudah in
 "di luar jadwal". Tanpa laporan di dekatnya = di luar aplikasi (console/manual). Ini KESIMPULAN dari waktu -- hanya label, tidak ada
 peringatan/perilaku yang bergantung padanya. Kepastian lewat job_id di state butuh s3:GetObject (irisan berikutnya).
 
+Status RUN Glue langsung dari Glue API (GetJobRuns, hanya baca): run yang SEDANG berjalan tidak meninggalkan jejak di S3 (laporan baru
+ditulis di akhir run), jadi tanpa ini tahap Glue tampil "segar" selama run ad hoc berlangsung dan "KB menunggu" tidak jelas menunggu apa.
+Run berjalan -> "Glue berproses"; run terbaru yang gagal (dimulai sesudah laporan terakhir) -> "Glue gagal". Email "terlambat" tetap
+berdasar LAPORAN (report_status), tidak bergantung Glue API. Glue API gagal dibaca -> tampilan kembali ke penilaian dari laporan.
+
 Penilaian (glue_state/kb_state) fungsi murni dari waktu + fakta tersimpan, dihitung saat dibaca. Gagal baca (izin, format laporan
 tak dikenal) = status 'unreadable', BUKAN 'segar' (PRD risiko R12). Kelak, saat run Glue dijalankan dari aplikasi ini (Fase 6/7),
 status Glue dibaca langsung dari JobRun dan tebakan jadwal tidak diperlukan lagi.
@@ -44,6 +49,9 @@ ATTRIBUTION_WINDOW_S = 30        # laporan harus selesai 0-30 dtk sesudah ingest
 ATTRIBUTION_MIN_AGE_S = 120      # beri waktu laporan ditulis sebelum menyimpulkan "tidak ada laporan"
 MARKER_SKEW_S = 30               # toleransi selisih jam antara LastModified S3 dan startedAt Bedrock
 RAW_MAX_PAGES = 100              # pindai raw/ maksimal 100 halaman LIST (100 ribu objek), lalu ditandai partial
+ACTIVE_RUN = ("STARTING", "RUNNING", "WAITING", "STOPPING")
+FAILED_RUN = ("FAILED", "ERROR", "TIMEOUT", "EXPIRED")
+RUN_FACTS_MAX_AGE = timedelta(minutes=30)   # fakta run Glue yang lebih tua dari ini tidak dipercaya (worker berhenti memperbarui)
 
 
 def hhmm(s: str) -> time:
@@ -141,27 +149,51 @@ def refresh_raw(conn: sqlite3.Connection, s3, now: datetime | None = None, force
     return result
 
 
+def glue_job_name(pattern: str, dataset: str) -> str:
+    return pattern.replace("{dataset}", dataset)
+
+
+def latest_glue_run(glue, job_name: str) -> dict | None:
+    """Run Glue terbaru {state, started_at, ended_at} dari GetJobRuns, atau None bila job belum pernah dijalankan."""
+    runs = glue.get_job_runs(JobName=job_name, MaxResults=3).get("JobRuns", [])
+    if not runs:
+        return None
+    r = max(runs, key=lambda x: x["StartedOn"])
+    return {"state": r["JobRunState"], "started_at": _iso(r["StartedOn"]), "ended_at": _iso(r.get("CompletedOn"))}
+
+
 # ---------------------------------------------------------------------------
 # Penilaian (fungsi murni)
 # ---------------------------------------------------------------------------
 
-def glue_state(latest_end: datetime | None, now: datetime, run_time: time, deadline: time, error: str | None = None) -> dict:
+def glue_state(latest_end: datetime | None, now: datetime, run_time: time, deadline: time, error: str | None = None,
+               run: dict | None = None) -> dict:
     """
-    Status tahap Glue: ok | waiting | late | unreadable. Yang dinilai = jadwal TERAKHIR yang sudah mulai (hari ini bila jam
-    sekarang >= run_time, selain itu kemarin): ok bila sudah ada laporan selesai sesudah jadwal itu; waiting bila belum tapi batas
-    belum lewat; late bila batas lewat.
+    Status tahap Glue: running | failed | ok | waiting | late | unreadable.
+    report_status (ok/waiting/late/unreadable) = penilaian dari LAPORAN run: yang dinilai jadwal TERAKHIR yang sudah mulai (hari ini
+    bila jam sekarang >= run_time, selain itu kemarin) -- ok bila sudah ada laporan selesai sesudah jadwal itu, waiting bila belum tapi
+    batas belum lewat, late bila batas lewat. Ini dasar email "terlambat".
+    status = tampilan: run Glue yang sedang berjalan (run dari Glue API) mengalahkan segalanya; run terbaru yang GAGAL dan dimulai
+    sesudah laporan terakhir tampil 'failed'; selain itu sama dengan report_status.
     """
     now_wib = now.astimezone(WIB)
     day = now_wib.date() if now_wib.time() >= run_time else now_wib.date() - timedelta(days=1)
     run_at = datetime.combine(day, run_time, tzinfo=WIB)
     deadline_at = datetime.combine(day, deadline, tzinfo=WIB)
     if error:
-        status = "unreadable"
+        report_status = "unreadable"
     elif latest_end and latest_end >= run_at:
-        status = "ok"
+        report_status = "ok"
     else:
-        status = "late" if now >= deadline_at else "waiting"
-    return {"status": status, "expected_run_at": _iso(run_at), "deadline_at": _iso(deadline_at), "last_report_at": _iso(latest_end)}
+        report_status = "late" if now >= deadline_at else "waiting"
+    status = report_status
+    if run:
+        if run["state"] in ACTIVE_RUN:
+            status = "running"
+        elif run["state"] in FAILED_RUN and (latest_end is None or _parse(run["started_at"]) > latest_end):
+            status = "failed"
+    return {"status": status, "report_status": report_status, "expected_run_at": _iso(run_at), "deadline_at": _iso(deadline_at),
+            "last_report_at": _iso(latest_end), "run": run}
 
 
 def kb_state(marker_at: datetime | None, ingestions: list[tuple[datetime, str]], now: datetime, pending_minutes: int,
@@ -189,11 +221,21 @@ def kb_state(marker_at: datetime | None, ingestions: list[tuple[datetime, str]],
     return out
 
 
+def hold_while_glue_runs(glue: dict, kb: dict) -> dict:
+    """
+    Selama run Glue BERJALAN, KB yang "tertunda" dikembalikan ke "menunggu" (waiting_for_glue): Glue memulai ingestion di akhir run,
+    jadi run yang panjang tanpa perubahan penanda bukan tanda ingestion macet. Terbukti perlu: run WM 3 Nov berjalan > 2 jam.
+    """
+    if glue["status"] == "running" and kb["status"] in ("pending", "waiting"):
+        return kb | {"status": "waiting", "waiting_for_glue": True}
+    return kb
+
+
 def overall(glue: dict | None, kb: dict | None) -> str:
     """attention (perlu perhatian) | unknown (belum bisa dinilai) | ok."""
     if not glue or not kb:
         return "unknown"
-    if glue["status"] in ("late",) or kb["status"] in ("pending", "failed"):
+    if glue["status"] in ("late", "failed") or kb["status"] in ("pending", "failed"):
         return "attention"
     if "unreadable" in (glue["status"], kb["status"]):
         return "unknown"
@@ -237,11 +279,13 @@ def attribute(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime, 
     return labeled
 
 
-def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | None = None) -> dict:
+def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | None = None, glue=None,
+            glue_error: str | None = None) -> dict:
     """
-    LIST laporan Glue + penanda perubahan satu target jalur dokumen, simpan fakta, atribusi ingestion, dan kirim email sekali per
-    episode (Glue terlambat / ingestion tertunda). Pembacaan pertama target tidak mengirim email (kondisi lama bukan kejadian baru).
-    Return {status: glue/kb/overall, alerts, labeled, error}. Tidak melempar error.
+    LIST laporan Glue + penanda perubahan satu target jalur dokumen, baca status run Glue (bila klien `glue` diberikan), simpan fakta,
+    atribusi ingestion, dan kirim email sekali per episode (Glue terlambat / ingestion tertunda). Pembacaan pertama target tidak
+    mengirim email (kondisi lama bukan kejadian baru). `glue_error` = pesan bila klien Glue gagal dibuat. Tanpa `glue` dan tanpa
+    `glue_error`, fakta run sebelumnya dipertahankan. Return {glue, kb, overall, alerts, labeled, error, glue_error}. Tidak melempar error.
     """
     now = now or datetime.now(timezone.utc)
     tid, dataset = target["id"], target["dataset"]
@@ -249,8 +293,10 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
     run_time, deadline = hhmm(s["kb.glue_run_time"]), hhmm(s["kb.glue_deadline"])
     prev = conn.execute("SELECT * FROM kb_pipeline_status WHERE target_id = ?", (tid,)).fetchone()
 
-    latest, n_objects, marker, error = (prev["report_latest_at"] and _parse(prev["report_latest_at"])) if prev else None, \
-        prev["report_objects"] if prev else None, (prev["marker_at"] and _parse(prev["marker_at"])) if prev else None, None
+    latest = _parse(prev["report_latest_at"]) if prev else None
+    n_objects = prev["report_objects"] if prev else None
+    marker = _parse(prev["marker_at"]) if prev else None
+    error = None
     try:
         today = now.astimezone(timezone.utc).date()
         ends, n_objects, unparsed = list_report_ends(s3, dataset, [today - timedelta(days=i) for i in range(REPORT_DAYS)])
@@ -264,17 +310,31 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
     except Exception as e:  # noqa: BLE001
         error = error or aws.error_message(e)
 
+    if glue is not None:
+        try:
+            run, glue_err = latest_glue_run(glue, glue_job_name(s["kb.glue_job_pattern"], dataset)), None
+        except Exception as e:  # noqa: BLE001
+            run, glue_err = None, aws.error_message(e)
+    elif glue_error:
+        run, glue_err = None, glue_error
+    else:
+        run = ({"state": prev["glue_run_state"], "started_at": prev["glue_run_started_at"], "ended_at": prev["glue_run_ended_at"]}
+               if prev and prev["glue_run_state"] else None)
+        glue_err = prev["glue_error"] if prev else None
+
     first = prev is None
-    glue = glue_state(latest, now, run_time, deadline, error)
-    kb = kb_state(marker, _recent_ingestions(conn, tid), now, s["kb.pending_minutes"], error)
+    glue_st = glue_state(latest, now, run_time, deadline, error, run)
+    kb = hold_while_glue_runs(glue_st, kb_state(marker, _recent_ingestions(conn, tid), now, s["kb.pending_minutes"], error))
     alerted_glue = prev["glue_alerted_for"] if prev else None
     alerted_kb = prev["pending_alerted_for"] if prev else None
     problems: list[tuple] = []
-    if glue["status"] == "late" and alerted_glue != glue["expected_run_at"]:
+    if glue_st["report_status"] == "late" and alerted_glue != glue_st["expected_run_at"]:
         if not first:
-            problems.append(("Glue cleansing", "belum ada laporan run",
-                             f"jadwal {run_time:%H:%M} WIB, batas {deadline:%H:%M} WIB; laporan terakhir {_wib(latest)}"))
-        alerted_glue = glue["expected_run_at"]
+            detail = f"jadwal {run_time:%H:%M} WIB, batas {deadline:%H:%M} WIB; laporan terakhir {_wib(latest)}"
+            if run:
+                detail += f"; run Glue terakhir {run['state']} sejak {_wib(_parse(run['started_at']))}"
+            problems.append(("Glue cleansing", "belum ada laporan run", detail))
+        alerted_glue = glue_st["expected_run_at"]
     if kb["status"] == "pending" and alerted_kb != kb["marker_at"]:
         if not first:
             problems.append(("Ingestion KB", "tertunda", f"isi KB berubah {_wib(marker)}, belum ada ingestion sesudahnya "
@@ -284,11 +344,15 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
     with write_tx(conn):
         conn.execute(
             "INSERT INTO kb_pipeline_status (target_id, checked_at, report_latest_at, report_objects, marker_at, error, "
-            "glue_alerted_for, pending_alerted_for) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_id) DO UPDATE SET "
+            "glue_alerted_for, pending_alerted_for, glue_run_state, glue_run_started_at, glue_run_ended_at, glue_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_id) DO UPDATE SET "
             "checked_at = excluded.checked_at, report_latest_at = excluded.report_latest_at, "
             "report_objects = excluded.report_objects, marker_at = excluded.marker_at, error = excluded.error, "
-            "glue_alerted_for = excluded.glue_alerted_for, pending_alerted_for = excluded.pending_alerted_for",
-            (tid, _iso(now), _iso(latest), n_objects, _iso(marker), error, alerted_glue, alerted_kb))
+            "glue_alerted_for = excluded.glue_alerted_for, pending_alerted_for = excluded.pending_alerted_for, "
+            "glue_run_state = excluded.glue_run_state, glue_run_started_at = excluded.glue_run_started_at, "
+            "glue_run_ended_at = excluded.glue_run_ended_at, glue_error = excluded.glue_error",
+            (tid, _iso(now), _iso(latest), n_objects, _iso(marker), error, alerted_glue, alerted_kb,
+             run["state"] if run else None, run["started_at"] if run else None, run["ended_at"] if run else None, glue_err))
     if problems:
         try:
             notify.notify_kb_stale(conn, dict(target), problems)
@@ -299,8 +363,8 @@ def refresh(conn: sqlite3.Connection, target: sqlite3.Row, s3, now: datetime | N
         labeled = attribute(conn, target, s3, now, run_time, deadline)
     except Exception as e:  # noqa: BLE001 -- label hanya pelengkap; dicoba lagi siklus berikutnya
         log.warning("Atribusi ingestion %s tertunda: %s", target["name"], aws.error_message(e))
-    return {"glue": glue["status"], "kb": kb["status"], "overall": overall(glue, kb), "alerts": len(problems),
-            "labeled": labeled, "error": error}
+    return {"glue": glue_st["status"], "kb": kb["status"], "overall": overall(glue_st, kb), "alerts": len(problems),
+            "labeled": labeled, "error": error, "glue_error": glue_err}
 
 
 def record_error(conn: sqlite3.Connection, target_id: int, message: str, now: datetime | None = None) -> None:
@@ -316,17 +380,27 @@ def record_error(conn: sqlite3.Connection, target_id: int, message: str, now: da
 # ---------------------------------------------------------------------------
 
 def view(conn: sqlite3.Connection, target: sqlite3.Row, settings: dict | None = None, now: datetime | None = None) -> dict | None:
-    """Status tiga tahap satu target untuk API/UI; None untuk target non-jalur-dokumen."""
+    """
+    Status tiga tahap satu target untuk API/UI; None untuk target non-jalur-dokumen. Fakta status run Glue yang lebih tua dari
+    RUN_FACTS_MAX_AGE tidak dipakai (`stale` = worker berhenti memperbarui): "berproses" yang basi lebih menyesatkan daripada tak ada.
+    """
     if target["pipeline"] != "documents":
         return None
     now = now or datetime.now(timezone.utc)
     s = settings or get_settings(conn, "kb.")
     st = conn.execute("SELECT * FROM kb_pipeline_status WHERE target_id = ?", (target["id"],)).fetchone()
-    base = {"checked_at": None, "error": None, "glue": None, "kb": None, "overall": "unknown",
-            "schedule": {"run_time": s["kb.glue_run_time"], "deadline": s["kb.glue_deadline"], "pending_minutes": s["kb.pending_minutes"]}}
+    base = {"checked_at": None, "error": None, "glue_error": None, "stale": False, "glue": None, "kb": None, "overall": "unknown",
+            "schedule": {"run_time": s["kb.glue_run_time"], "deadline": s["kb.glue_deadline"], "pending_minutes": s["kb.pending_minutes"],
+                         "glue_job": glue_job_name(s["kb.glue_job_pattern"], target["dataset"] or "")}}
     if st is None:
         return base
     err = st["error"]
-    glue = glue_state(_parse(st["report_latest_at"]), now, hhmm(s["kb.glue_run_time"]), hhmm(s["kb.glue_deadline"]), err)
-    kb = kb_state(_parse(st["marker_at"]), _recent_ingestions(conn, target["id"]), now, s["kb.pending_minutes"], err)
-    return base | {"checked_at": st["checked_at"], "error": err, "glue": glue, "kb": kb, "overall": overall(glue, kb)}
+    checked = _parse(st["checked_at"])
+    fresh = checked is not None and now - checked <= RUN_FACTS_MAX_AGE
+    run = ({"state": st["glue_run_state"], "started_at": st["glue_run_started_at"], "ended_at": st["glue_run_ended_at"]}
+           if st["glue_run_state"] and fresh else None)
+    glue = glue_state(_parse(st["report_latest_at"]), now, hhmm(s["kb.glue_run_time"]), hhmm(s["kb.glue_deadline"]), err, run)
+    kb = hold_while_glue_runs(glue, kb_state(_parse(st["marker_at"]), _recent_ingestions(conn, target["id"]), now,
+                                              s["kb.pending_minutes"], err))
+    return base | {"checked_at": st["checked_at"], "error": err, "glue_error": st["glue_error"], "stale": not fresh, "glue": glue,
+                   "kb": kb, "overall": overall(glue, kb)}

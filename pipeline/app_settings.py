@@ -37,6 +37,7 @@ DEFAULTS = {
     "kb.poll_active_seconds": 45,   # jeda saat ada ingestion yang masih berjalan
     "kb.glue_run_time": "03:00",    # jam (WIB) jadwal cleansing Glue dokumen SAAT INI (kelak run Glue dijalankan dari aplikasi ini)
     "kb.glue_deadline": "06:00",    # jam (WIB) batas: belum ada laporan run sesudah jadwal -> "Glue terlambat" + email
+    "kb.glue_job_pattern": "documents-cleansing-and-chunking-{dataset}",   # nama job Glue per dataset ({dataset} diganti nama dataset)
     "kb.pending_minutes": 120,      # penanda perubahan KB tanpa ingestion sesudahnya lebih lama dari ini -> "ingestion tertunda"
     "kb.raw_scan_minutes": 60,      # jeda pindai documents/raw/ (hanya informasi)
     "kb.raw_status": None,          # hasil pindai raw/ terakhir {checked_at, latest_at, objects, partial, error}

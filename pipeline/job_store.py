@@ -370,6 +370,14 @@ CREATE TABLE kb_pipeline_status (
     pending_alerted_for TEXT                -- penanda perubahan (marker_at) yang sudah dikirimi email tertunda
 );
 """,
+    # v14 -- status run Glue langsung dari Glue API (GetJobRuns): run yang SEDANG berjalan tidak meninggalkan jejak di S3 (laporan
+    # baru ditulis di akhir run), jadi tanpa ini tahap Glue tampil 'segar' selama run ad hoc berlangsung.
+    """
+ALTER TABLE kb_pipeline_status ADD COLUMN glue_run_state TEXT;        -- JobRunState run Glue terbaru
+ALTER TABLE kb_pipeline_status ADD COLUMN glue_run_started_at TEXT;
+ALTER TABLE kb_pipeline_status ADD COLUMN glue_run_ended_at TEXT;
+ALTER TABLE kb_pipeline_status ADD COLUMN glue_error TEXT;            -- pesan aplikasi bila Glue API gagal dibaca
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 

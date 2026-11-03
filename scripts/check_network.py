@@ -67,6 +67,7 @@ def main() -> int:
         ("SMTP (SMTP_HOST)", (smtp_host, int(os.environ.get("SMTP_PORT", "587"))) if smtp_host else None),
         ("S3 (AWS_REGION)", (f"s3.{region}.amazonaws.com", 443)),
         ("Bedrock Knowledge Base (bedrock-agent, AWS_REGION)", (f"bedrock-agent.{region}.amazonaws.com", 443)),
+        ("Glue (status run job dokumen, AWS_REGION)", (f"glue.{region}.amazonaws.com", 443)),
     ]
     if os.environ.get("AWS_PROFILE", "").strip():   # IAM role: kredensial instance dari metadata, lalu assume role
         metadata = os.environ.get("AWS_EC2_METADATA_SERVICE_ENDPOINT", "").strip() or "http://169.254.169.254"

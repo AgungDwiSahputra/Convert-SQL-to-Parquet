@@ -378,9 +378,15 @@ def _refresh_flow(conn: sqlite3.Connection, target: sqlite3.Row, result: dict | 
     except Exception as e:  # noqa: BLE001
         kb_pipeline.record_error(conn, target["id"], aws.error_message(e))
         return
-    r = kb_pipeline.refresh(conn, target, s3)
+    glue, glue_error = None, None
+    try:
+        glue = aws.client("glue")
+    except Exception as e:  # noqa: BLE001 -- status run Glue hanya pelengkap; tahap lain tetap dinilai dari S3
+        glue_error = aws.error_message(e)
+    r = kb_pipeline.refresh(conn, target, s3, glue=glue, glue_error=glue_error)
     if result is not None:
         result["flow_alerts"] += r["alerts"]
+        result["active"] = result["active"] or r["glue"] == "running"   # run Glue berjalan -> polling lebih sering (kb.poll_active_seconds)
 
 
 def sync_all(conn: sqlite3.Connection, by: str = "worker", client=None) -> dict:

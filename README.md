@@ -750,8 +750,8 @@ ke role tanpa mengubah kode. Profile hasil `aws login` (PC dev) butuh `pip insta
 memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/check_network.py`.
 
 **Izin IAM** yang dipakai (policy `svc-kpn-ai-policy` v5): `bedrock:GetKnowledgeBase`, `GetDataSource`, `ListDataSources`,
-`ListIngestionJobs`, `GetIngestionJob`, `StartIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen, irisan
-berikutnya). `bedrock:ListKnowledgeBases` ditambahkan v5 pada resource `knowledge-base/*` dan terbukti berfungsi di GIS04 (uji 3 Nov 2026;
+`ListIngestionJobs`, `GetIngestionJob`, `StartIngestionJob` pada `knowledge-base/*`; `s3:ListBucket` (kesegaran jalur dokumen);
+`glue:GetJobRuns` dan `glue:GetJobs` (status run Glue; endpoint `glue.<region>.amazonaws.com` ikut dicek `check_network.py`). `bedrock:ListKnowledgeBases` ditambahkan v5 pada resource `knowledge-base/*` dan terbukti berfungsi di GIS04 (uji 3 Nov 2026;
 dugaan awal bahwa aksi List butuh `"Resource": "*"` ternyata keliru); form pendaftaran tetap memakai Knowledge Base ID yang diketik. Membaca isi `reports/` &
 `state/` jalur dokumen butuh `s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy v5).
 
@@ -767,13 +767,13 @@ itu. Di PC dev, profile `monitoring-datas` di `.env` menunjuk `AWS_CONFIG_FILE=C
 2. **GIS04** — izin role sesungguhnya: `check_network.py`, Pengaturan → Uji koneksi AWS, lalu daftarkan Knowledge Base (semua panggilan
    read-only). Backup `jobs.db` sebelum deploy (migrasi v12 otomatis).
 
-**Kesegaran tiga tahap** (`pipeline/kb_pipeline.py`, untuk target berjalur `documents`; hanya S3 `LIST`, tanpa `GetObject`). Fakta hasil LIST
-disimpan di `kb_pipeline_status`; statusnya dihitung saat dibaca (`glue_state`, `kb_state` = fungsi murni dari waktu):
+**Kesegaran tiga tahap** (`pipeline/kb_pipeline.py`, untuk target berjalur `documents`; S3 `LIST` tanpa `GetObject`, plus status run Glue lewat
+`glue:GetJobRuns`). Fakta hasil LIST/Glue API disimpan di `kb_pipeline_status`; statusnya dihitung saat dibaca (`glue_state`, `kb_state` = fungsi murni dari waktu):
 
 | Tahap | Sumber | Penilaian |
 |---|---|---|
 | 1. rclone | objek terbaru di `documents/raw/` (pindai tiap `kb.raw_scan_minutes`, 60) | **Informasi saja, tidak pernah memicu peringatan**: rclone hanya mengunggah file yang berubah, jadi raw lama tidak berubah itu wajar |
-| 2. Glue | laporan `v2/<ds>/reports/runs/dt=…/<YYYYMMDDTHHMMSS>-<id>.jsonl` (waktu di nama = waktu SELESAI run, UTC) | ok / menunggu / **terlambat**: belum ada laporan sesudah jadwal (`kb.glue_run_time` 03:00 WIB) saat batas (`kb.glue_deadline` 06:00 WIB) lewat. Sebelum jam jadwal, yang dinilai jadwal kemarin |
+| 2. Glue | laporan `v2/<ds>/reports/runs/dt=…/<YYYYMMDDTHHMMSS>-<id>.jsonl` (waktu di nama = waktu SELESAI run, UTC) | ok / menunggu / **terlambat** (dasar email): belum ada laporan sesudah jadwal (`kb.glue_run_time` 03:00 WIB) saat batas (`kb.glue_deadline` 06:00 WIB) lewat. Sebelum jam jadwal, yang dinilai jadwal kemarin. Tampilan ditimpa status run dari Glue API: **berproses** (run STARTING/RUNNING/WAITING/STOPPING, mengalahkan laporan yang segar) dan **gagal** (run terbaru FAILED/ERROR/TIMEOUT/EXPIRED yang dimulai sesudah laporan terakhir) |
 | 3. KB | `LastModified` `state/kb_changed_at/<ds>` vs ingestion | ok / berjalan / menunggu / **tertunda** (penanda lebih baru dari semua ingestion dan > `kb.pending_minutes`, 120) / gagal |
 
 - Email (`notify_kb_stale`, saklar `notify.on_kb`) **sekali per episode**: per jadwal Glue (`expected_run_at`) dan per penanda perubahan
@@ -784,6 +784,13 @@ disimpan di `kb_pipeline_status`; statusnya dihitung saat dibaca (`glue_state`, 
   di luar jadwal" (job Glue dokumen juga dijalankan di luar jam jadwal dan tetap memulai ingestion sendiri). Tanpa laporan di dekatnya = "Di luar
   aplikasi" (console/manual/pemuatan awal). KESIMPULAN dari waktu — hanya label; kepastian via `job_id` di state butuh `s3:GetObject`. Ingestion
   dinilai setelah ≥ 2 menit dan hanya sekali (`origin_checked`).
+- **Status run Glue** (`kb.glue_job_pattern`, default `documents-cleansing-and-chunking-{dataset}`): run Glue yang sedang berjalan tidak
+  meninggalkan jejak di S3 (laporan baru ditulis di akhir run), jadi tanpa Glue API tahap Glue tampil "segar" selama run ad hoc. Fakta run
+  disimpan tiap siklus (jeda aktif `kb.poll_active_seconds` selama ada run berjalan) dan tidak dipercaya bila > 30 menit tidak diperbarui
+  (`stale`). Glue API gagal dibaca (izin/nama job) → tampilan kembali ke penilaian dari laporan + pesan; email "terlambat" tidak bergantung
+  Glue API. Selama run Glue berjalan, KB tidak pernah dinilai "tertunda" (tetap "menunggu", `waiting_for_glue`): Glue memulai ingestion
+  di AKHIR run, dan run bisa > 2 jam tanpa penanda bergeser (WM 3 Nov 2026: 14:36 sampai lewat 16:48). "Tertunda" baru berlaku setelah run
+  selesai tanpa ingestion.
 - **Catatan arah**: jadwal 03:00 + batas 06:00 mengikuti jadwal Glue SAAT INI dan sifatnya menebak waktu selesai. Kelak run Glue (termasuk cleansing
   dokumen) dijalankan dari sistem ini (PRD Fase 6/7); status dibaca langsung dari JobRun dan tebakan jam itu tidak diperlukan lagi. Penilaian
   "ingestion tertunda" tetap berlaku.

@@ -75,7 +75,7 @@ export default function SettingsPage() {
     setKbSaving(true)
     setKbMessage(null)
     try {
-      await api('/settings/kb', { method: 'PUT', body: { enabled: kbForm.enabled, poll_idle_seconds: kbForm.poll_idle_seconds, poll_active_seconds: kbForm.poll_active_seconds, glue_run_time: kbForm.glue_run_time, glue_deadline: kbForm.glue_deadline, pending_minutes: kbForm.pending_minutes, raw_scan_minutes: kbForm.raw_scan_minutes } })
+      await api('/settings/kb', { method: 'PUT', body: { enabled: kbForm.enabled, poll_idle_seconds: kbForm.poll_idle_seconds, poll_active_seconds: kbForm.poll_active_seconds, glue_run_time: kbForm.glue_run_time, glue_deadline: kbForm.glue_deadline, pending_minutes: kbForm.pending_minutes, raw_scan_minutes: kbForm.raw_scan_minutes, glue_job_pattern: kbForm.glue_job_pattern } })
       setKbMessage({ tone: 'info', text: 'Pengaturan pemantauan Knowledge Base tersimpan (berlaku dalam beberapa detik, tanpa restart).' })
     } catch (e) {
       setKbMessage({ tone: 'error', text: e.message })
@@ -394,6 +394,9 @@ export default function SettingsPage() {
                       </Field>
                       <Field label="Ingestion dianggap tertunda" htmlFor="kb-pending" hint="Menit sejak isi KB berubah tanpa ada ingestion sesudahnya (15–1440).">
                         <input id="kb-pending" type="number" min={15} max={1440} className={inputClass} value={kbForm.pending_minutes} onChange={(e) => setKbForm((f) => ({ ...f, pending_minutes: Number(e.target.value) }))} />
+                      </Field>
+                      <Field label="Nama job Glue per dataset" htmlFor="kb-job" hint="Untuk status “Glue berproses/gagal” (GetJobRuns). {dataset} diganti nama dataset target.">
+                        <input id="kb-job" className={`${inputClass} font-mono`} maxLength={120} value={kbForm.glue_job_pattern} onChange={(e) => setKbForm((f) => ({ ...f, glue_job_pattern: e.target.value }))} />
                       </Field>
                       <Field label="Jeda pindai raw/" htmlFor="kb-raw" hint="Menit, hanya informasi (15–1440).">
                         <input id="kb-raw" type="number" min={15} max={1440} className={inputClass} value={kbForm.raw_scan_minutes} onChange={(e) => setKbForm((f) => ({ ...f, raw_scan_minutes: Number(e.target.value) }))} />
