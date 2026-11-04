@@ -486,3 +486,25 @@ def _output_of(row: JobRow, target_date: str) -> str | None:
         return build_job(row.name, row.template, row.args, target_date).output
     except Exception:  # noqa: BLE001
         return None
+
+
+DISPLAY_NAME_MAX = 80
+_DISPLAY_NAME_BAD = re.compile(r"[\x00-\x1f\x7f;<>]")
+
+
+def validate_display_name(value: str | None, rows: list[JobRow], name: str) -> str | None:
+    """
+    Pesan error nama tampilan (None = valid). Kosong = boleh (label otomatis). Unik tanpa membedakan huruf besar/kecil
+    terhadap job LAIN (sama dengan indeks ux_jobs_display_name); tanpa karakter kontrol, ';' (pemisah CSV impor) atau <>.
+    """
+    if not value:
+        return None
+    if len(value) < 3 or len(value) > DISPLAY_NAME_MAX:
+        return f"Nama tampilan 3-{DISPLAY_NAME_MAX} karakter."
+    if _DISPLAY_NAME_BAD.search(value):
+        return "Nama tampilan tidak boleh memuat baris baru, ';', '<' atau '>'."
+    key = value.casefold()
+    for r in rows:
+        if r.name != name and r.display_name and r.display_name.casefold() == key:
+            return f"Nama tampilan sudah dipakai job '{r.name}'."
+    return None

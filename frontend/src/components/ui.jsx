@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import { AlertTriangle, CircleAlert, Info, Loader2, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertTriangle, ChevronDown, CircleAlert, Info, Loader2, Wrench, X } from 'lucide-react'
 
 export const cx = (...c) => c.filter(Boolean).join(' ')
 
@@ -65,6 +65,46 @@ export function IconChip({ icon: Icon, tone = 'blue', size = 'md' }) {
     <span className={cx('flex shrink-0 items-center justify-center', sizes[size][0], tones[tone])}>
       <Icon className={sizes[size][1]} aria-hidden />
     </span>
+  )
+}
+
+function readOpen(key) {
+  try {
+    return localStorage.getItem(`pqx_tech_${key}`) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * "Detail teknis" yang bisa dibuka-tutup (Operator/Admin) -- default TERTUTUP supaya halaman tetap ringkas; pilihan diingat per
+ * browser (localStorage, per storageKey). Viewer tidak pernah merender ini: datanya memang tidak dikirim server.
+ */
+export function TechDetails({ storageKey, title = 'Detail teknis', summary, children, className }) {
+  const [open, setOpen] = useState(() => readOpen(storageKey))
+  const toggle = () => setOpen((o) => {
+    try {
+      localStorage.setItem(`pqx_tech_${storageKey}`, o ? '0' : '1')
+    } catch {
+      // storage diblokir: tetap bisa dibuka-tutup, hanya tidak diingat
+    }
+    return !o
+  })
+  return (
+    <div className={cx('border-t border-gray-100', className)}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-5 py-2.5 text-left text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
+      >
+        <Wrench className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span>{title}</span>
+        {!open && summary && <span className="min-w-0 truncate font-normal text-gray-400">· {summary}</span>}
+        <ChevronDown className={cx('ml-auto h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')} aria-hidden />
+      </button>
+      {open && <div className="px-5 pb-4">{children}</div>}
+    </div>
   )
 }
 

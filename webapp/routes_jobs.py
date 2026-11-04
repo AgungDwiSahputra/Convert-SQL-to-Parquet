@@ -17,13 +17,13 @@ from pydantic import BaseModel, Field
 
 from pipeline import freshness
 from pipeline.job_store import (
-    JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, load_job_rows,
+    JobRow, build_jobs, create_job, default_target_date, get_job_row, job_history, job_label, load_job_rows,
     master_snapshot_history, set_job_enabled, update_job,
 )
 from pipeline.job_templates import (
     PERIODCODE_FORMATS, STRDATE_FORMATS, SIMPLE_ARROW_TYPES, build_job, default_cadence, s3_folder, s3_target_info,
 )
-from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_job
+from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_display_name, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, count_rows, test_run
 from webapp.deps import current_user, get_db, require_role
 
@@ -36,6 +36,8 @@ class JobDraft(BaseModel):
     args: dict
     notes: str | None = Field(default=None, max_length=20_000)
     cadence: Literal["daily", "weekly", "monthly", "snapshot"] | None = None   # None = tebak dari template
+    # None = TIDAK dikirim -> saat edit nilai lama dipertahankan (form lama tidak menghapusnya); "" = kosongkan (label otomatis).
+    display_name: str | None = Field(default=None, max_length=200)
     original_name: str | None = None   # diisi saat edit
     confirm_s3_move: bool = False
 
@@ -64,6 +66,8 @@ def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
         s3_key = None
     return {
         "name": row.name,
+        "display_name": row.display_name,
+        "label": row.label,
         "template": row.template,
         "template_label": TEMPLATE_SPECS.get(row.template, {}).get("label", row.template),
         "enabled": row.enabled,
@@ -85,12 +89,24 @@ def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
     }
 
 
+def _display_name(body: JobDraft, original: JobRow | None) -> str | None:
+    """Nilai nama tampilan yang akan disimpan: tidak dikirim -> nilai lama; kosong -> None (label otomatis)."""
+    if body.display_name is None:
+        return original.display_name if original else None
+    return " ".join(body.display_name.split()) or None
+
+
 def _validate_or_422(body: JobDraft, user: dict, db: sqlite3.Connection, original: JobRow | None):
-    v = validate_job(body.name, body.template, body.args, role=user["role"], rows=load_job_rows(enabled_only=False),
+    rows = load_job_rows(enabled_only=False)
+    v = validate_job(body.name, body.template, body.args, role=user["role"], rows=rows,
                      catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move, cadence=body.cadence)
-    if not v.ok:
+    errors = dict(v.errors)
+    dn_error = validate_display_name(_display_name(body, original), rows, original.name if original else body.name)
+    if dn_error:
+        errors["display_name"] = dn_error
+    if errors:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            {"message": "Periksa kembali isian job.", "errors": v.errors,
+                            {"message": "Periksa kembali isian job.", "errors": errors,
                              "needs_s3_confirm": v.needs_s3_confirm})
     return v
 
@@ -126,13 +142,20 @@ def templates(_user: dict = Depends(current_user)):
 def validate(body: JobDraft, user: dict = Depends(require_role("operator")), db: sqlite3.Connection = Depends(get_db)):
     """Validasi draf TANPA menyimpan -- dipanggil form secara live (preview path S3, error per field)."""
     original = _get_or_404(db, body.original_name) if body.original_name else None
-    v = validate_job(body.name, body.template, body.args, role=user["role"], rows=load_job_rows(enabled_only=False),
+    rows = load_job_rows(enabled_only=False)
+    v = validate_job(body.name, body.template, body.args, role=user["role"], rows=rows,
                      catalog=CATALOG, original=original, confirm_s3_move=body.confirm_s3_move, cadence=body.cadence)
     try:
         cadence = default_cadence(body.template, body.args)
     except Exception:  # noqa: BLE001 -- draf belum lengkap
         cadence = None
-    return {**v.as_dict(), "default_cadence": cadence}
+    out = {**v.as_dict(), "default_cadence": cadence,
+           "label": job_label(body.name, body.args, _display_name(body, original))}
+    dn_error = validate_display_name(_display_name(body, original), rows, original.name if original else body.name)
+    if dn_error:
+        out["errors"] = {**out.get("errors", {}), "display_name": dn_error}
+        out["ok"] = False
+    return out
 
 
 def _draft_for_test(body: TestRunIn, user: dict, db: sqlite3.Connection) -> tuple:
@@ -204,11 +227,12 @@ def get_job(name: str, user: dict = Depends(current_user), db: sqlite3.Connectio
 def create(body: JobCreate, user: dict = Depends(require_role("operator")), db: sqlite3.Connection = Depends(get_db)):
     _validate_or_422(body, user, db, None)
     row = JobRow(name=body.name, template=body.template, args=body.args, enabled=body.enabled,
-                 sort_order=0, notes=(body.notes or "").strip() or None, cadence=body.cadence)
+                 sort_order=0, notes=(body.notes or "").strip() or None, cadence=body.cadence,
+                 display_name=_display_name(body, None))
     try:
         create_job(db, row, user["username"])
     except sqlite3.IntegrityError:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Nama '{body.name}' sudah dipakai job lain.")
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Nama '{body.name}' atau nama tampilannya sudah dipakai job lain.")
     return {"name": body.name}
 
 
@@ -219,8 +243,12 @@ def update(name: str, body: JobDraft, user: dict = Depends(require_role("operato
     body.original_name = name
     v = _validate_or_422(body, user, db, old)
     new = JobRow(name=name, template=body.template, args=body.args, enabled=old.enabled,
-                 sort_order=old.sort_order, notes=(body.notes or "").strip() or None, cadence=body.cadence)
-    update_job(db, old, new, user["username"], s3_moved=v.s3_moved)
+                 sort_order=old.sort_order, notes=(body.notes or "").strip() or None, cadence=body.cadence,
+                 display_name=_display_name(body, old))
+    try:
+        update_job(db, old, new, user["username"], s3_moved=v.s3_moved)
+    except sqlite3.IntegrityError:   # balapan dua editor dengan nama tampilan sama (validasi sudah lewat)
+        raise HTTPException(status.HTTP_409_CONFLICT, "Nama tampilan sudah dipakai job lain.")
     return {"name": name, "s3_moved": v.s3_moved}
 
 

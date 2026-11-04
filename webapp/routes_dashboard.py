@@ -13,8 +13,9 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 
-from pipeline.job_store import default_target_date
-from webapp.deps import ROLE_RANK, current_user, get_db
+from pipeline.job_store import default_target_date, load_job_rows
+from webapp import simple_view
+from webapp.deps import ROLE_RANK, current_user, get_db, is_viewer
 
 router = APIRouter()
 
@@ -37,13 +38,15 @@ def summary(user: dict = Depends(current_user), db: sqlite3.Connection = Depends
     data_date = date.fromisoformat(default_target_date())
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
     recent = db.execute(_LATEST + " AND d.created_at >= ? ORDER BY d.target_date DESC, d.job_name", (since,)).fetchall()
+    labels = {r.name: r.label for r in load_job_rows(enabled_only=False)}
     counts = {"ok": 0, "warning": 0, "blocked": 0, "unchecked": 0}
     issues = {"blocked": [], "warning": []}
     for r in recent:
         counts[r["dq_status"]] = counts.get(r["dq_status"], 0) + 1
         if r["dq_status"] in issues:
-            issues[r["dq_status"]].append({"job_name": r["job_name"], "target_date": r["target_date"],
-                                           "run_id": r["run_id"], "message": _messages(r["checks"], r["dq_status"])})
+            issue = {"job_name": r["job_name"], "label": labels.get(r["job_name"], r["job_name"]), "target_date": r["target_date"],
+                     "run_id": r["run_id"], "message": _messages(r["checks"], r["dq_status"])}
+            issues[r["dq_status"]].append(simple_view.dashboard_issue(issue) if is_viewer(user) else issue)
 
     first = data_date - timedelta(days=13)
     by_day = {(first + timedelta(days=i)).isoformat(): {"rows": 0, "jobs": 0, "blocked": 0} for i in range(14)}

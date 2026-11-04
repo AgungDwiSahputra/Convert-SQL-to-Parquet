@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { ArrowLeft, Pencil, Play, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowLeft, History, Pencil, Play, RefreshCw, Trash2, Workflow } from 'lucide-react'
 import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtDateTime, fmtDuration, fmtNumber, fmtRelative } from '../lib/format'
-import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, Modal, PageHeader, Switch, inputClass } from '../components/ui'
-import { ActionStatusBadge, IngestionBadge, KbHealthBadge, PIPELINE_LABEL, StageBadge, originInfo } from '../components/kb'
+import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, Modal, PageHeader, Switch, TechDetails, inputClass } from '../components/ui'
+import {
+  ActionStatusBadge, IngestionBadge, KbNotes, PIPELINE_LABEL, SimpleKbBadge, SimpleResultBadge, StageBadge, StepList, changeText, originInfo,
+} from '../components/kb'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -87,21 +89,21 @@ function EditModal({ open, target, onClose, onSaved }) {
   )
 }
 
-function FlowCard({ flow, raw }) {
+/** Rincian teknis tiga tahap jalur dokumen (rclone → Glue → ingestion), di dalam "Detail teknis". */
+function FlowDetails({ flow, raw }) {
   const sched = flow.schedule
   const g = flow.glue
   const k = flow.kb
   return (
-    <Card className="overflow-hidden">
-      <CardHeader title="Jalur dokumen" description="rclone → Glue cleansing → ingestion Knowledge Base · dibaca dari S3 (hanya daftar objek)" />
-      {flow.error && <div className="px-5 pt-4"><Alert tone="warning" title="Sebagian status tidak dapat dibaca">{flow.error}</Alert></div>}
+    <div className="space-y-3">
+      {flow.error && <Alert tone="warning" title="Sebagian status tidak dapat dibaca">{flow.error}</Alert>}
       {flow.stale && flow.checked_at && (
-        <div className="px-5 pt-4"><Alert tone="warning" title="Status belum diperbarui">Terakhir diperiksa {fmtRelative(flow.checked_at)}. Pastikan worker berjalan; status “berproses” tidak ditampilkan dari data yang sudah basi.</Alert></div>
+        <Alert tone="warning" title="Status belum diperbarui">Terakhir diperiksa {fmtRelative(flow.checked_at)}. Pastikan worker berjalan; status “berproses” tidak ditampilkan dari data yang sudah basi.</Alert>
       )}
-      <ul className="divide-y divide-gray-100">
+      <ul className="divide-y divide-gray-100 rounded-lg border border-gray-100">
         <li className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-800">1 · Salin dokumen (rclone)</p>
+            <p className="text-sm font-medium text-gray-800">1 · Salin dokumen dari Google Drive (rclone)</p>
             <p className="mt-0.5 text-xs text-gray-500">
               {raw?.error ? raw.error : raw?.latest_at ? `File baru terakhir di raw/: ${fmtDateTime(raw.latest_at)} · ${fmtNumber(raw.objects)} objek${raw.partial ? '+' : ''}` : 'Belum dipindai.'}
             </p>
@@ -111,7 +113,7 @@ function FlowCard({ flow, raw }) {
         </li>
         <li className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-800">2 · Cleansing Glue</p>
+            <p className="text-sm font-medium text-gray-800">2 · Pembersihan dokumen (Glue cleansing)</p>
             {g ? (
               <>
                 {g.status === 'running' && g.run && (
@@ -127,7 +129,6 @@ function FlowCard({ flow, raw }) {
                   Jadwal {sched.run_time} WIB · batas lapor {sched.deadline} WIB
                   {g.report_status === 'late' && <span className="text-red-600"> · belum ada laporan sesudah jadwal {fmtDateTime(g.expected_run_at)}</span>}
                 </p>
-                <p className="mt-0.5 font-mono text-[11px] text-gray-400">Job Glue: {sched.glue_job}</p>
                 {flow.glue_error && <p className="mt-0.5 text-xs text-amber-700">Status run Glue tidak terbaca ({flow.glue_error}) — status dinilai dari laporan saja.</p>}
               </>
             ) : <p className="mt-0.5 text-xs text-gray-400">Belum diperiksa.</p>}
@@ -136,7 +137,7 @@ function FlowCard({ flow, raw }) {
         </li>
         <li className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-800">3 · Ingestion Knowledge Base</p>
+            <p className="text-sm font-medium text-gray-800">3 · Pembaruan Knowledge Base (ingestion)</p>
             {k ? (
               <>
                 <p className="mt-0.5 text-xs text-gray-500">{k.marker_at ? `Isi KB terakhir berubah ${fmtDateTime(k.marker_at)}` : 'Belum ada penanda perubahan.'}</p>
@@ -153,23 +154,73 @@ function FlowCard({ flow, raw }) {
           {k && <StageBadge kind="kb" status={k.status} />}
         </li>
       </ul>
-      {flow.checked_at && <p className="border-t border-gray-100 px-5 py-2.5 text-xs text-gray-400">Diperiksa {fmtRelative(flow.checked_at)}.</p>}
-    </Card>
+      <p className="text-xs text-gray-400">
+        Dibaca dari daftar objek S3 + status run Glue{flow.checked_at ? ` · diperiksa ${fmtRelative(flow.checked_at)}` : ''}{sched.glue_job ? <> · job <span className="font-mono">{sched.glue_job}</span></> : null}.
+      </p>
+    </div>
+  )
+}
+
+/** Tabel teknis riwayat ingestion (50 terbaru) di dalam "Detail teknis". */
+function IngestionTable({ ingestions }) {
+  if (ingestions.length === 0) return <p className="text-sm text-gray-500">Belum ada ingestion tercatat untuk data source ini.</p>
+  return (
+    <div className="overflow-x-auto rounded-lg border border-gray-100">
+      <table className="w-full min-w-[44rem] text-left text-sm">
+        <thead className="bg-gray-50 text-xs font-medium text-gray-500">
+          <tr>
+            <th className="px-4 py-2.5">Mulai (WIB)</th>
+            <th className="px-3 py-2.5">Status</th>
+            <th className="px-3 py-2.5 text-right">Durasi</th>
+            <th className="px-3 py-2.5 text-right">Dipindai</th>
+            <th className="px-3 py-2.5 text-right">Baru</th>
+            <th className="px-3 py-2.5 text-right">Diubah</th>
+            <th className="px-3 py-2.5 text-right">Dihapus</th>
+            <th className="px-3 py-2.5 text-right">Gagal</th>
+            <th className="px-4 py-2.5">Asal</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {ingestions.map((i) => (
+            <tr key={i.id} className="align-top">
+              <td className="px-4 py-3 text-gray-800">
+                {fmtDateTime(i.started_at)}
+                <span className="block font-mono text-[11px] text-gray-400">{i.ingestion_job_id}</span>
+                {i.failure_reasons.length > 0 && (
+                  <ul className="mt-1.5 max-w-xs list-disc space-y-0.5 pl-4 text-xs text-amber-700">
+                    {i.failure_reasons.slice(0, 3).map((r, k) => <li key={k} className="break-words">{r}</li>)}
+                    {i.failure_reasons.length > 3 && <li>+{i.failure_reasons.length - 3} lainnya</li>}
+                  </ul>
+                )}
+              </td>
+              <td className="px-3 py-3"><IngestionBadge status={i.status} /></td>
+              <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtDuration(i.duration_s)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.scanned)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.new_indexed)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.modified_indexed)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.deleted)}</td>
+              <td className={`px-3 py-3 text-right tabular-nums ${i.failed ? 'font-semibold text-red-700' : 'text-gray-600'}`}>{fmtNumber(i.failed)}</td>
+              <td className="px-4 py-3 text-xs text-gray-500" title={originInfo(i).hint}>{originInfo(i).label}{i.started_by ? ` · ${i.started_by}` : ''}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
 const ACTION_INFO = {
   glue_run: {
-    title: 'Cleansing Glue',
-    desc: 'Menjalankan job Glue dataset ini sekarang. Glue memulai ingestion Knowledge Base sendiri di akhir run bila ada dokumen berubah.',
-    button: 'Jalankan cleansing',
+    title: 'Pembersihan dokumen',
+    desc: 'Menjalankan pembersihan dokumen (job Glue) sekarang. Di akhir proses, Knowledge Base diperbarui otomatis bila ada dokumen berubah.',
+    button: 'Jalankan pembersihan',
     icon: Play,
     confirm: (t, job) => `Job ${job} akan dijalankan sekarang. Run tanpa dokumen berubah selesai dalam hitungan menit; dokumen baru diproses model vision (berbiaya) dan run WM bisa berjalan berjam-jam. Lanjutkan?`,
   },
   ingestion: {
-    title: 'Sync Knowledge Base',
-    desc: 'Memulai ingestion Bedrock langsung (tanpa cleansing). Untuk saat Glue tidak memicu sync, atau Knowledge Base tanpa jalur Glue.',
-    button: 'Sync sekarang',
+    title: 'Pembaruan Knowledge Base',
+    desc: 'Memasukkan dokumen ke Knowledge Base sekarang (ingestion Bedrock, tanpa pembersihan). Untuk saat pembaruan otomatis tidak berjalan, atau Knowledge Base tanpa jalur pembersihan.',
+    button: 'Perbarui sekarang',
     icon: RefreshCw,
     confirm: (t) => (t.pipeline === 'documents'
       ? 'Bedrock akan mengindeks perubahan di data source ini (inkremental). Glue tidak mengetahui sync ini, jadi di akhir run berikutnya Glue mungkin memulai satu ingestion lagi. Lanjutkan?'
@@ -200,7 +251,7 @@ function ManualActionsCard({ target, flow, availability, actions, canRun, onRequ
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader title="Proses manual" description="Diantrikan ke worker; syarat diperiksa ulang dengan data AWS terbaru sebelum dimulai" />
+      <CardHeader title="Proses manual" description="Dijalankan oleh proses otomatis dalam ±20 detik; syarat diperiksa ulang dengan data terbaru sebelum dimulai" />
       <ul className="divide-y divide-gray-100">
         {order.map((a) => {
           const info = ACTION_INFO[a]
@@ -261,6 +312,8 @@ function ManualActionsCard({ target, flow, availability, actions, canRun, onRequ
   )
 }
 
+// SATU tampilan untuk semua peran. Bagian sederhana dari `target`/`ingestions` (semua peran); "Detail teknis", proses manual, dan
+// tombol kelola muncul bila server mengirim `tech`/`availability` -- yaitu untuk Operator/Admin.
 export default function KnowledgeBaseDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -268,7 +321,7 @@ export default function KnowledgeBaseDetailPage() {
   const isAdmin = hasRole(user, 'admin')
   const isOperator = hasRole(user, 'operator')
   const { data, error, loading, reload } = useApi(`/kb/${id}`, {
-    refreshMs: (d) => (d?.actions?.some((a) => a.status === 'queued' || a.status === 'running') ? 5000 : d?.target?.running || d?.target?.flow?.glue?.status === 'running' ? 15000 : 60000),
+    refreshMs: (d) => (d?.actions?.some((a) => a.status === 'queued' || a.status === 'running') ? 5000 : d?.target?.status === 'updating' ? 15000 : 60000),
   })
   const [refreshing, setRefreshing] = useState(false)
   const [message, setMessage] = useState(null)
@@ -276,16 +329,18 @@ export default function KnowledgeBaseDetailPage() {
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  const back = (
+    <Link to="/kb" className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
+      <ArrowLeft className="h-4 w-4" aria-hidden />Knowledge Base
+    </Link>
+  )
   if (loading && !data) return <LoadingBlock />
   if (error && !data) {
-    return (
-      <>
-        <Link to="/kb" className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline"><ArrowLeft className="h-4 w-4" aria-hidden />Knowledge Base</Link>
-        <Alert tone="error">{error.message}</Alert>
-      </>
-    )
+    return <>{back}<Alert tone="error">{error.status === 404 ? 'Knowledge Base ini tidak tersedia.' : error.message}</Alert></>
   }
-  const { target: t, ingestions } = data
+  const t = data.target
+  const tech = data.tech // hanya Operator/Admin
+  const full = tech?.target
 
   const refresh = async () => {
     setRefreshing(true)
@@ -314,103 +369,103 @@ export default function KnowledgeBaseDetailPage() {
 
   return (
     <>
-      <Link to="/kb" className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline">
-        <ArrowLeft className="h-4 w-4" aria-hidden />Knowledge Base
-      </Link>
+      {back}
       <PageHeader
-        title={t.title || t.name}
-        description={t.notes || undefined}
+        title={<span className="inline-flex flex-wrap items-center gap-3">{t.title}<SimpleKbBadge status={t.status} /></span>}
+        description={full?.notes || undefined}
         actions={(
           <>
-            {isOperator && <Button variant="secondary" icon={RefreshCw} loading={refreshing} onClick={refresh}>Muat ulang riwayat</Button>}
-            {isAdmin && <Button variant="secondary" icon={Pencil} onClick={() => setEditing(true)}>Pengaturan</Button>}
-            {isAdmin && <Button variant="ghost" icon={Trash2} onClick={() => setConfirmDelete(true)}>Hapus</Button>}
+            {isOperator && tech && <Button variant="secondary" icon={RefreshCw} loading={refreshing} onClick={refresh}>Muat ulang riwayat</Button>}
+            {isAdmin && full && <Button variant="secondary" icon={Pencil} onClick={() => setEditing(true)}>Pengaturan</Button>}
+            {isAdmin && full && <Button variant="ghost" icon={Trash2} onClick={() => setConfirmDelete(true)}>Hapus</Button>}
           </>
         )}
       />
 
       <div className="space-y-4">
         {message && <Alert tone={message.tone}>{message.text}</Alert>}
-        {t.poll_error && <Alert tone="warning" title="Sinkron terakhir gagal">{t.poll_error}</Alert>}
-        {!t.enabled && <Alert tone="info">Target ini nonaktif — worker tidak menyinkronkan riwayatnya.</Alert>}
+        {full?.poll_error && <Alert tone="warning" title="Sinkron riwayat terakhir gagal">{full.poll_error}</Alert>}
+        {t.status === 'off' && <Alert tone="info">Knowledge Base ini tidak dipantau — riwayatnya tidak diperbarui otomatis.</Alert>}
 
-        <Card className="p-5">
-          <div className="flex flex-wrap items-center gap-3">
-            <KbHealthBadge health={t.health} />
-            {t.pipeline === 'documents' && <Badge tone="blue">Jalur dokumen{t.dataset ? ` · ${t.dataset}` : ''}</Badge>}
-            <span className="text-xs text-gray-500" title={t.polled_at ? fmtDateTime(t.polled_at) : undefined}>
-              {t.polled_at ? `Riwayat disinkronkan ${fmtRelative(t.polled_at)}` : 'Belum pernah disinkronkan'}
-            </span>
+        <Card className="overflow-hidden">
+          <div className="grid divide-y divide-gray-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+            <div className="px-5 py-4">
+              <p className="text-xs text-gray-500">Terakhir diperbarui</p>
+              <p className="mt-1 font-semibold text-gray-800">{t.updated_at ? fmtRelative(t.updated_at) : '–'}</p>
+              {t.updated_at && <p className="text-xs text-gray-500">{fmtDateTime(t.updated_at)}</p>}
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-xs text-gray-500">Jumlah dokumen</p>
+              <p className="mt-1 font-semibold text-gray-800">{t.documents != null ? fmtNumber(t.documents) : '–'}</p>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-xs text-gray-500">Perubahan terakhir</p>
+              <p className="mt-1 font-semibold text-gray-800">{changeText(t.last_change) || '–'}</p>
+            </div>
           </div>
-          <dl className="mt-4 grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
-            <div><dt className="text-xs text-gray-500">Knowledge Base ID</dt><dd className="mt-0.5 font-mono text-gray-800">{t.knowledge_base_id}</dd></div>
-            <div><dt className="text-xs text-gray-500">Data Source ID</dt><dd className="mt-0.5 font-mono text-gray-800">{t.data_source_id}</dd></div>
-            <div className="sm:col-span-2"><dt className="text-xs text-gray-500">Sumber di S3 (prefix)</dt><dd className="mt-0.5 break-all font-mono text-gray-800">{t.source_prefix || '(seluruh bucket)'}</dd></div>
-          </dl>
+          {(t.reason || t.last_attempt_failed || t.failed_documents > 0) && <div className="space-y-1 border-t border-gray-100 px-5 py-3"><KbNotes t={t} /></div>}
+          {full && (
+            <TechDetails storageKey="kb-ids" summary="ID Knowledge Base & data source, prefix S3">
+              <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
+                <div><dt className="text-xs text-gray-500">Knowledge Base ID</dt><dd className="mt-0.5 font-mono text-gray-800">{full.knowledge_base_id}</dd></div>
+                <div><dt className="text-xs text-gray-500">Data Source ID</dt><dd className="mt-0.5 font-mono text-gray-800">{full.data_source_id}</dd></div>
+                <div className="sm:col-span-2"><dt className="text-xs text-gray-500">Sumber di S3 (prefix)</dt><dd className="mt-0.5 break-all font-mono text-gray-800">{full.source_prefix || '(seluruh bucket)'}</dd></div>
+                <div><dt className="text-xs text-gray-500">Nama target · jalur</dt><dd className="mt-0.5 text-gray-800"><span className="font-mono">{full.name}</span> · {PIPELINE_LABEL[full.pipeline]}{full.dataset ? ` · ${full.dataset}` : ''}</dd></div>
+                <div><dt className="text-xs text-gray-500">Riwayat disinkronkan</dt><dd className="mt-0.5 text-gray-800">{full.polled_at ? fmtDateTime(full.polled_at) : 'Belum pernah'}</dd></div>
+              </dl>
+            </TechDetails>
+          )}
         </Card>
 
-        {t.flow && <FlowCard flow={t.flow} raw={data.monitor?.raw} />}
+        {t.steps && (
+          <Card className="overflow-hidden">
+            <CardHeader icon={Workflow} title="Alur pembaruan dokumen" description="Dokumen dari Google Drive disalin, dibersihkan, lalu dimasukkan ke Knowledge Base — otomatis setiap malam" />
+            <div className="p-4 sm:p-5"><StepList steps={t.steps} /></div>
+            {full?.flow && (
+              <TechDetails storageKey="kb-flow" summary="rclone, run Glue, penanda perubahan, jadwal & batas">
+                <FlowDetails flow={full.flow} raw={tech.monitor?.raw} />
+              </TechDetails>
+            )}
+          </Card>
+        )}
 
-        {data.availability && (
-          <ManualActionsCard target={t} flow={t.flow} availability={data.availability} actions={data.actions || []} canRun={isOperator} onRequested={reload} />
+        {data.availability && full && (
+          <ManualActionsCard target={full} flow={full.flow} availability={data.availability} actions={data.actions || []} canRun={isOperator} onRequested={reload} />
         )}
 
         <Card className="overflow-hidden">
-          <CardHeader title="Riwayat ingestion" description="50 terbaru, termasuk yang dimulai job Glue atau console AWS" />
-          {ingestions.length === 0 ? (
-            <p className="px-5 py-8 text-center text-sm text-gray-500">Belum ada ingestion tercatat untuk data source ini.</p>
+          <CardHeader icon={History} title="Riwayat pembaruan" description="10 pembaruan terakhir" />
+          {data.ingestions.length === 0 ? (
+            <p className="px-5 py-4 text-sm text-gray-500">Belum ada pembaruan tercatat.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[44rem] text-left text-sm">
-                <thead className="bg-gray-50 text-xs font-medium text-gray-500">
-                  <tr>
-                    <th className="px-4 py-2.5">Mulai (WIB)</th>
-                    <th className="px-3 py-2.5">Status</th>
-                    <th className="px-3 py-2.5 text-right">Durasi</th>
-                    <th className="px-3 py-2.5 text-right">Dipindai</th>
-                    <th className="px-3 py-2.5 text-right">Baru</th>
-                    <th className="px-3 py-2.5 text-right">Diubah</th>
-                    <th className="px-3 py-2.5 text-right">Dihapus</th>
-                    <th className="px-3 py-2.5 text-right">Gagal</th>
-                    <th className="px-4 py-2.5">Asal</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {ingestions.map((i) => (
-                    <tr key={i.id} className="align-top">
-                      <td className="px-4 py-3 text-gray-800" title={i.ingestion_job_id}>
-                        {fmtDateTime(i.started_at)}
-                        {i.failure_reasons.length > 0 && (
-                          <ul className="mt-1.5 max-w-xs list-disc space-y-0.5 pl-4 text-xs text-amber-700">
-                            {i.failure_reasons.slice(0, 3).map((r, k) => <li key={k} className="break-words">{r}</li>)}
-                            {i.failure_reasons.length > 3 && <li>+{i.failure_reasons.length - 3} lainnya</li>}
-                          </ul>
-                        )}
-                      </td>
-                      <td className="px-3 py-3"><IngestionBadge status={i.status} /></td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtDuration(i.duration_s)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.scanned)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.new_indexed)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.modified_indexed)}</td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600">{fmtNumber(i.deleted)}</td>
-                      <td className={`px-3 py-3 text-right tabular-nums ${i.failed ? 'font-semibold text-red-700' : 'text-gray-600'}`}>{fmtNumber(i.failed)}</td>
-                      <td className="px-4 py-3 text-xs text-gray-500" title={originInfo(i).hint}>{originInfo(i).label}{i.started_by ? ` · ${i.started_by}` : ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <ul className="divide-y divide-gray-100">
+              {data.ingestions.map((i) => (
+                <li key={i.started_at} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3">
+                  <span className="w-40 shrink-0 text-sm text-gray-700">{fmtDateTime(i.started_at)}</span>
+                  <SimpleResultBadge status={i.status} />
+                  <span className="min-w-0 flex-1 text-sm text-gray-600">
+                    {i.status === 'done' ? changeText(i) : i.status === 'running' ? 'Sedang diproses…' : 'Pembaruan tidak selesai'}
+                    {i.failed_documents > 0 && <span className="text-amber-800"> · {fmtNumber(i.failed_documents)} dokumen belum bisa diproses</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {tech && (
+            <TechDetails storageKey="kb-hist" summary="50 ingestion terbaru: ID job, durasi, dipindai, gagal, asal, alasan gagal">
+              <IngestionTable ingestions={tech.ingestions} />
+            </TechDetails>
           )}
         </Card>
       </div>
 
-      <EditModal open={editing} target={t} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); reload() }} />
+      {full && <EditModal open={editing} target={full} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); reload() }} />}
       <Modal
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
         size="md"
         title="Hapus target?"
-        description={`“${t.title || t.name}” dan riwayat ingestion yang tersimpan di aplikasi akan dihapus. Knowledge Base di AWS tidak terpengaruh.`}
+        description={`“${t.title}” dan riwayat pembaruan yang tersimpan di aplikasi akan dihapus. Knowledge Base di AWS tidak terpengaruh.`}
         footer={(
           <>
             <Button variant="secondary" onClick={() => setConfirmDelete(false)}>Batal</Button>
@@ -423,3 +478,4 @@ export default function KnowledgeBaseDetailPage() {
     </>
   )
 }
+

@@ -354,6 +354,25 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   Viewer yang daftar otomatis belum boleh Ekspor Cepat (`users.can_export = 0`) sampai admin menyalakan
   saklar **Ekspor** di halaman Users; jumlah yang menunggu tampil di Users, Pengaturan, dan Beranda admin.
   User yang ditambahkan admin langsung boleh.
+- **Satu tampilan untuk semua peran** (bahasa sehari-hari untuk pengguna non-teknis; redesain bertahap — sudah: Beranda,
+  Knowledge Base). Keputusan pemilik: dua versi UI per peran terlalu mahal dirawat.
+  - SATU komponen per halaman. Perbedaan peran hanya TAMBAHAN: tombol aksi (role-gated, seperti sebelumnya) dan bagian
+    **"Detail teknis"** (`TechDetails` di `components/ui.jsx`: bisa dibuka-tutup, default tertutup, diingat per browser) yang
+    dirender bila datanya ada — jadi satu jalur kode, tanpa cabang "kalau Viewer begini".
+  - Server: SATU bentuk respons — bagian sederhana dari **proyeksi allowlist** `webapp/simple_view.py` untuk semua peran, plus blok
+    `tech` (data lengkap) / `actions` / `availability` HANYA untuk operator/admin (`deps.is_viewer`). Viewer tidak pernah menerima
+    ID AWS, path/prefix S3, bucket, nama job Glue, query/argumen, pesan error/DQ mentah — menyembunyikan di layar saja bukan
+    perlindungan; field baru di data lengkap tidak ikut bocor.
+  - Istilah sederhana untuk SEMUA peran, termasuk menu: Run → Proses, Job → Data, Ekspor Cepat → Unduh Data, DQ → pemeriksaan
+    kualitas, Glue cleansing → pembersihan dokumen, ingestion → pembaruan. Istilah/identifier teknis hanya di "Detail teknis".
+  - **Pratinjau tampilan Viewer** (khusus admin, tombol di sidebar): header `X-View-As: viewer` dari admin membuat server
+    memperlakukannya PERSIS sebagai Viewer (data disaring, semua aksi 403) — hanya menurunkan hak; header dari role lain
+    diabaikan. Disimpan per tab (`sessionStorage`), jadi tutup tab = kembali normal.
+- **Nama tampilan job** (`jobs.display_name`, skema v16): label ramah yang tampil di UI, unik tanpa membedakan huruf
+  besar/kecil. `name` TIDAK pernah diganti (nama file output, path S3 terkunci, riwayat run/DQ/inventaris). Kosong = label
+  otomatis `job_store.job_label` ("HMS · Panen"). Isi massal: `python manage.py set-display-names <csv>` (kolom `name;display_name`,
+  tanpa `--apply` hanya rencana, satu transaksi, tercatat `rename` di riwayat job). File CSV-nya data environment — jangan di Git.
+  Form job yang tidak mengirim `display_name` mempertahankan nilai lama.
 - **Run** dibuat dari halaman Jalankan atau dari jadwal. Semantiknya sama dengan CLI: job harian sekali
   per tanggal, job master sekali dengan snapshot tanggal awal, job mingguan/bulanan sekali per periode
   (`run_store.plan_items`; item berlabel awal periode). Default opsi sama dengan
@@ -371,7 +390,7 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   menutup masalah lama); kesegaran & celah dari `/api/jobs`.
 - **Skema `jobs.db`**: `jobs`, `job_history`, `users`, `sessions`, `runs`, `run_items`, `workers`,
   `schedules`, `settings`, `notifications`, `adhoc_exports`, `dq_results`, `master_snapshots`, `s3_inventory`,
-  `kb_targets`, `kb_ingestions`, `kb_pipeline_status`. Dinaikkan otomatis saat web, worker, atau CLI start.
+  `kb_targets`, `kb_ingestions`, `kb_pipeline_status`, `kb_actions`. Dinaikkan otomatis saat web, worker, atau CLI start.
 - **Pengembangan frontend**: `python -m uvicorn webapp.main:app --reload` + `cd frontend; npm run dev`
   (Vite :5173 mem-proxy `/api` ke :8000). Warna hanya lewat token `brand-*`/`gray-*`/`blue-*` di
   `frontend/src/index.css` (palet hijau, mode terang). Dokumentasi API: `/api/docs`.
@@ -757,7 +776,9 @@ memakai role). Uji: Pengaturan → **Uji koneksi AWS**, atau `python scripts/che
 dugaan awal bahwa aksi List butuh `"Resource": "*"` ternyata keliru); form pendaftaran tetap memakai Knowledge Base ID yang diketik. Membaca isi `reports/` &
 `state/` jalur dokumen butuh `s3:GetObject` pada `documents/knowledge-base-preparation/v2/*/reports/*` dan `*/state/*` (belum ada di policy v5).
 
-**Akses**: viewer melihat; operator memuat ulang riwayat dan menjalankan proses manual; admin mendaftarkan/mengubah/menghapus target dan mengatur
+**Akses** (satu tampilan, §8): semua peran melihat status Siap/Sedang diperbarui/Ada kendala + alasannya, jumlah dokumen, tiga
+langkah alur, riwayat pembaruan; operator/admin juga menerima blok `tech` ("Detail teknis": ID KB/data source, prefix S3, rincian
+rclone/Glue/penanda, tabel 50 ingestion) — Viewer tidak, dan target nonaktif disembunyikan darinya; operator memuat ulang riwayat dan menjalankan proses manual; admin mendaftarkan/mengubah/menghapus target dan mengatur
 pemantauan (Pengaturan → AWS & Knowledge Base). API: `/api/kb` (`routes_kb.py`). Pesan error AWS ke UI = pesan sendiri per kode
 error (`aws.error_message`), bukan pesan asli AWS (memuat ARN role, nomor akun, nama bucket).
 

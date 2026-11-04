@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 from typing import Iterator
 
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 
 from pipeline import run_store
 from pipeline.job_store import utc_now
@@ -27,9 +27,17 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+PREVIEW_HEADER = "X-View-As"
+
+
 def current_user(pqx_session: str | None = Cookie(default=None),
+                 x_view_as: str | None = Header(default=None),
                  db: sqlite3.Connection = Depends(get_db)) -> dict:
-    """User aktif pemilik cookie session. Role dibaca ulang tiap request -> perubahan role/nonaktif langsung berlaku."""
+    """
+    User aktif pemilik cookie session. Role dibaca ulang tiap request -> perubahan role/nonaktif langsung berlaku.
+    Pratinjau tampilan Viewer: ADMIN yang mengirim header `X-View-As: viewer` diperlakukan PERSIS sebagai Viewer (data disaring,
+    aksi operator/admin ditolak) -- hanya menurunkan hak, tidak pernah menaikkan; header dari role lain diabaikan.
+    """
     if pqx_session:
         row = db.execute(
             "SELECT u.username, u.full_name, u.email, u.role, u.can_export FROM sessions s "
@@ -37,8 +45,16 @@ def current_user(pqx_session: str | None = Cookie(default=None),
             "WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
             (hash_token(pqx_session), utc_now())).fetchone()
         if row:
-            return dict(row, can_export=bool(row["can_export"]))
+            user = dict(row, can_export=bool(row["can_export"]))
+            if (x_view_as or "").strip().lower() == "viewer" and user["role"] == "admin":
+                user.update(role="viewer", real_role="admin", preview=True)
+            return user
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Belum login atau session sudah habis.")
+
+
+def is_viewer(user: dict) -> bool:
+    """Tampilan sederhana (non-teknis): role Viewer, termasuk admin yang sedang pratinjau. Data teknis tidak dikirim."""
+    return user["role"] == "viewer"
 
 
 def can_quick_export(user: dict) -> bool:

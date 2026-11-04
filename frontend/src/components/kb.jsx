@@ -1,27 +1,98 @@
+import { AlertTriangle, CheckCircle2, CircleDashed, Clock, Loader2 } from 'lucide-react'
 import { cx } from './ui'
+import { fmtDateTime, fmtNumber, fmtRelative } from '../lib/format'
 
-// Kesehatan target Knowledge Base (pipeline/kb_sync.health_of): running | ok | warning | failed | stopped | none.
-const HEALTH = {
-  ok: ['Sehat', 'bg-brand-50 text-brand-700', 'bg-brand-500'],
-  running: ['Sedang berjalan', 'bg-blue-50 text-blue-700', 'bg-blue-600'],
-  warning: ['Ada dokumen gagal', 'bg-amber-50 text-amber-700', 'bg-amber-500'],
-  failed: ['Ingestion gagal', 'bg-red-50 text-red-700', 'bg-red-500'],
-  stopped: ['Dihentikan', 'bg-gray-100 text-gray-600', 'bg-gray-400'],
-  none: ['Belum ada ingestion', 'bg-gray-100 text-gray-500', 'bg-gray-300'],
+// =====================================================================================================
+// Bagian SEDERHANA (semua peran) -- data dari webapp/simple_view.py. Kosakata status sengaja kecil & sama di semua halaman.
+// =====================================================================================================
+
+// Status Knowledge Base (simple_view.kb_status)
+const KB = {
+  ready: ['Siap', 'bg-brand-50 text-brand-700', 'bg-brand-500'],
+  updating: ['Sedang diperbarui', 'bg-blue-50 text-blue-700', 'bg-blue-500'],
+  problem: ['Ada kendala', 'bg-amber-50 text-amber-800', 'bg-amber-500'],
+  none: ['Belum pernah diperbarui', 'bg-gray-100 text-gray-600', 'bg-gray-400'],
+  off: ['Tidak dipantau', 'bg-gray-100 text-gray-500', 'bg-gray-300'],
+  unknown: ['Status belum tersedia', 'bg-gray-100 text-gray-500', 'bg-gray-300'],
 }
 
-export function KbHealthBadge({ health }) {
-  const [label, classes, dot] = HEALTH[health] || HEALTH.none
+export function SimpleKbBadge({ status }) {
+  const [label, chip, dot] = KB[status] || KB.unknown
   return (
-    <span className={cx('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium', classes)}>
-      <span className="relative flex h-1.5 w-1.5">
-        {health === 'running' && <span className={cx('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', dot)} />}
-        <span className={cx('relative inline-flex h-1.5 w-1.5 rounded-full', dot)} />
-      </span>
+    <span className={cx('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium', chip)}>
+      <span className={cx('h-1.5 w-1.5 rounded-full', dot, status === 'updating' && 'animate-pulse')} aria-hidden />
       {label}
     </span>
   )
 }
+
+// Hasil satu pembaruan (simple_view.kb_ingestions)
+const RESULT = {
+  done: ['Berhasil', 'bg-brand-50 text-brand-700'],
+  failed: ['Gagal', 'bg-red-50 text-red-700'],
+  stopped: ['Dihentikan', 'bg-gray-100 text-gray-600'],
+  running: ['Berjalan', 'bg-blue-50 text-blue-700'],
+}
+
+export function SimpleResultBadge({ status }) {
+  const [label, chip] = RESULT[status] || RESULT.running
+  return <span className={cx('inline-flex whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', chip)}>{label}</span>
+}
+
+/** Catatan kendala satu Knowledge Base dalam bahasa sehari-hari (daftar & detail). */
+export function KbNotes({ t }) {
+  return (
+    <>
+      {t.reason && <p className="text-xs text-amber-800">{t.reason}</p>}
+      {t.last_attempt_failed && t.updated_at && (
+        <p className="text-xs text-amber-800">Pembaruan terakhir belum berhasil — isi yang dipakai masih versi {fmtDateTime(t.updated_at)}.</p>
+      )}
+      {t.failed_documents > 0 && <p className="text-xs text-amber-800">{fmtNumber(t.failed_documents)} dokumen belum bisa diproses.</p>}
+    </>
+  )
+}
+
+/** "4 baru · 2 diubah · 1 dihapus"; tanpa perubahan -> teks netral. */
+export function changeText(c) {
+  if (!c) return null
+  const parts = [c.added && `${c.added} baru`, c.modified && `${c.modified} diubah`, c.deleted && `${c.deleted} dihapus`].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'Tanpa perubahan isi'
+}
+
+// Langkah alur (simple_view.kb_steps)
+const STEP = {
+  done: [CheckCircle2, 'text-brand-600', 'Selesai'],
+  running: [Loader2, 'text-blue-600 animate-spin', 'Sedang berjalan'],
+  waiting: [Clock, 'text-gray-400', 'Menunggu'],
+  problem: [AlertTriangle, 'text-amber-600', 'Ada kendala'],
+  unknown: [CircleDashed, 'text-gray-300', 'Belum tersedia'],
+}
+
+export function StepList({ steps }) {
+  return (
+    <ol className="grid gap-3 sm:grid-cols-3">
+      {steps.map((s, i) => {
+        const [Icon, color, label] = STEP[s.status] || STEP.unknown
+        return (
+          <li key={s.key} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50/60 p-3">
+            <Icon className={cx('mt-0.5 h-5 w-5 shrink-0', color)} aria-hidden />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-gray-800"><span className="text-gray-400">{i + 1}.</span> {s.label}</p>
+              <p className="mt-0.5 text-xs text-gray-500">
+                {label}
+                {s.at && <> · <span title={fmtDateTime(s.at)}>{fmtRelative(s.at)}</span></>}
+              </p>
+            </div>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+// =====================================================================================================
+// Bagian TEKNIS (hanya Operator/Admin, di dalam "Detail teknis") -- data dari blok `tech` respons API.
+// =====================================================================================================
 
 // Status satu ingestion job Bedrock.
 const INGESTION = {
@@ -51,6 +122,7 @@ export function originInfo(i) {
   }
   return { label: 'Di luar aplikasi', hint: 'Tidak ada laporan Glue di dekat waktu ini — umumnya console AWS (manual) atau pemuatan awal.' }
 }
+
 // Tahap jalur dokumen (pipeline/kb_pipeline): status Glue & KB.
 const GLUE_STAGE = {
   running: ['Glue berproses', 'bg-blue-50 text-blue-700'],
@@ -75,20 +147,9 @@ export function StageBadge({ kind, status }) {
   return <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>{label}</span>
 }
 
-/** Dua penanda kecil (Glue, KB) untuk target jalur dokumen di daftar. */
-export function FlowChips({ flow }) {
-  if (!flow?.glue || !flow?.kb) return null
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <StageBadge kind="glue" status={flow.glue.status} />
-      <StageBadge kind="kb" status={flow.kb.status} />
-    </span>
-  )
-}
-
 // Status permintaan proses manual (pipeline/kb_actions.py).
 const ACTION_STATUS = {
-  queued: ['Menunggu worker', 'bg-gray-100 text-gray-600'],
+  queued: ['Menunggu', 'bg-gray-100 text-gray-600'],
   running: ['Diproses', 'bg-blue-50 text-blue-700'],
   started: ['Dimulai', 'bg-brand-50 text-brand-700'],
   rejected: ['Ditolak', 'bg-amber-50 text-amber-700'],
@@ -100,12 +161,4 @@ export function ActionStatusBadge({ status }) {
   return <span className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>{label}</span>
 }
 
-export const PIPELINE_LABEL = { documents: 'Jalur dokumen (rclone → Glue → KB)', manual: 'Manual / lainnya' }
-
-/** Ringkasan statistik satu ingestion: '5 baru · 2 diubah · 0 dihapus · 1 gagal'. */
-export function ingestionStats(i) {
-  if (!i) return ''
-  const parts = [`${i.new_indexed ?? 0} baru`, `${i.modified_indexed ?? 0} diubah`, `${i.deleted ?? 0} dihapus`]
-  parts.push(`${i.failed ?? 0} gagal`)
-  return parts.join(' · ')
-}
+export const PIPELINE_LABEL = { documents: 'Jalur dokumen (Google Drive → pembersihan → Knowledge Base)', manual: 'Manual / lainnya' }

@@ -397,6 +397,13 @@ CREATE INDEX ix_kb_actions_target ON kb_actions (target_id, id);
 CREATE INDEX ix_kb_actions_status ON kb_actions (status, id);
 ALTER TABLE kb_pipeline_status ADD COLUMN journal_at TEXT;
 """,
+    # v16 -- nama tampilan job: label yang mudah dibaca (Viewer non-teknis) TANPA mengganti `name` -- `name` tetap identifier
+    # (nama file output, path S3 terkunci, run_items, dq_results, s3_inventory). NULL = label otomatis (job_store.job_label).
+    # Unik tanpa membedakan huruf besar/kecil supaya dua job tidak tampil dengan nama sama.
+    """
+ALTER TABLE jobs ADD COLUMN display_name TEXT;
+CREATE UNIQUE INDEX ux_jobs_display_name ON jobs (display_name COLLATE NOCASE) WHERE display_name IS NOT NULL;
+""",
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -422,15 +429,44 @@ class JobRow:
     updated_by: str | None = None
     updated_at: str | None = None
     cadence: str | None = None          # None = ditebak dari template (effective_cadence)
+    display_name: str | None = None     # None = label otomatis (job_label)
 
     @property
     def effective_cadence(self) -> str:
         return self.cadence or default_cadence(self.template, self.args)
 
+    @property
+    def label(self) -> str:
+        return job_label(self.name, self.args, self.display_name)
+
     def snapshot(self) -> dict:
-        """Isi job yang dicatat di job_history (sebelum/sesudah perubahan)."""
-        return {"template": self.template, "args": self.args, "enabled": self.enabled, "notes": self.notes,
+        """Isi job yang dicatat di job_history (sebelum/sesudah perubahan). display_name hanya bila diisi (riwayat lama tanpa kunci)."""
+        snap = {"template": self.template, "args": self.args, "enabled": self.enabled, "notes": self.notes,
                 "cadence": self.cadence}
+        if self.display_name:
+            snap["display_name"] = self.display_name
+        return snap
+
+
+_LABEL_PREFIX = ("bronze_", "gold_master_", "gold_")
+
+
+def job_label(name: str, args: dict | None = None, display_name: str | None = None) -> str:
+    """
+    Nama yang ditampilkan ke pengguna: display_name bila diisi, selain itu dari module/dataset folder S3 ("HMS · Panen"),
+    terakhir dari `name` tanpa awalan teknis. Hanya label -- identifier tetap `name`.
+    """
+    if display_name:
+        return display_name
+    args = args or {}
+    s3 = args.get("s3") if isinstance(args.get("s3"), dict) else {}
+    module, dataset = args.get("module") or s3.get("module"), args.get("dataset") or s3.get("dataset")
+    if dataset:
+        text = str(dataset).replace("_", " ").strip()
+        text = text[:1].upper() + text[1:]
+        return f"{str(module).upper()} · {text}" if module else text
+    base = next((name[len(p):] for p in _LABEL_PREFIX if name.startswith(p)), name).replace("_", " ").strip()
+    return base[:1].upper() + base[1:] if base else name
 
 
 def default_target_date() -> str:
@@ -490,7 +526,7 @@ def _row(r: sqlite3.Row) -> JobRow:
     keys = r.keys()
     return JobRow(r["name"], r["template"], json.loads(r["args"]), bool(r["enabled"]), r["sort_order"],
                   r["notes"], *(r[k] if k in keys else None
-                                for k in ("s3_locked_at", "updated_by", "updated_at", "cadence")))
+                                for k in ("s3_locked_at", "updated_by", "updated_at", "cadence", "display_name")))
 
 
 def load_job_rows(enabled_only: bool = True, path: str = JOBS_DB) -> list[JobRow]:
@@ -572,9 +608,9 @@ def create_job(conn: sqlite3.Connection, row: JobRow, by: str) -> None:
     with write_tx(conn):
         order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM jobs").fetchone()[0]
         conn.execute("INSERT INTO jobs (name, template, args, enabled, sort_order, notes, created_at, updated_at, "
-                     "updated_by, cadence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     "updated_by, cadence, display_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                      (row.name, row.template, _dumps(row.args), int(row.enabled), order, row.notes, now, now, by,
-                      row.cadence))
+                      row.cadence, row.display_name))
         _history(conn, row.name, "create", by, None, row.snapshot())
 
 
@@ -586,13 +622,29 @@ def update_job(conn: sqlite3.Connection, old: JobRow, new: JobRow, by: str, s3_m
     """
     definition_changed = new.template != old.template or new.args != old.args
     with write_tx(conn):
-        conn.execute("UPDATE jobs SET template = ?, args = ?, notes = ?, cadence = ?, updated_at = ?, updated_by = ?, "
-                     "s3_locked_at = CASE WHEN ? THEN NULL ELSE s3_locked_at END, "
+        conn.execute("UPDATE jobs SET template = ?, args = ?, notes = ?, cadence = ?, display_name = ?, updated_at = ?, "
+                     "updated_by = ?, s3_locked_at = CASE WHEN ? THEN NULL ELSE s3_locked_at END, "
                      "schema_json = CASE WHEN ? THEN NULL ELSE schema_json END WHERE name = ?",
-                     (new.template, _dumps(new.args), new.notes, new.cadence, utc_now(), by, int(s3_moved),
+                     (new.template, _dumps(new.args), new.notes, new.cadence, new.display_name, utc_now(), by, int(s3_moved),
                       int(definition_changed), old.name))
         _history(conn, old.name, "s3_move" if s3_moved else "update", by, old.snapshot(),
                  {**new.snapshot(), "enabled": old.enabled})
+
+
+def set_display_names(conn: sqlite3.Connection, changes: list[tuple[JobRow, str | None]], by: str) -> None:
+    """
+    Ganti nama tampilan beberapa job dalam SATU transaksi (manage.py set-display-names). Hanya label: definisi job, path S3,
+    dan skema acuan tidak tersentuh. Tiap perubahan tercatat di job_history (action 'rename').
+    """
+    with write_tx(conn):
+        # Kosongkan dulu semua yang berubah supaya tukar nama antar-job tidak menabrak indeks unik di tengah jalan.
+        conn.executemany("UPDATE jobs SET display_name = NULL WHERE name = ?", [(old.name,) for old, _ in changes])
+        now = utc_now()
+        for old, value in changes:
+            conn.execute("UPDATE jobs SET display_name = ?, updated_at = ?, updated_by = ? WHERE name = ?",
+                         (value, now, by, old.name))
+            new = JobRow(**{**old.__dict__, "display_name": value})
+            _history(conn, old.name, "rename", by, old.snapshot(), new.snapshot())
 
 
 def set_job_enabled(conn: sqlite3.Connection, old: JobRow, enabled: bool, by: str) -> None:

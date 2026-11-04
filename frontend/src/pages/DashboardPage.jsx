@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import {
-  AlertTriangle, ArrowRight, BarChart3, BellRing, CalendarClock, CheckCircle2, CircleAlert, Database, History, Info, Layers, Play, Plus,
-  Server, ShieldCheck, Zap,
+  AlertTriangle, ArrowRight, BarChart3, BellRing, BookOpen, CalendarClock, CheckCircle2, CircleAlert, Database, Download, History, Info,
+  Layers, Play, Plus, ShieldCheck, Zap,
 } from 'lucide-react'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
@@ -53,7 +53,7 @@ function Pill({ ok, children }) {
   )
 }
 
-function HealthBanner({ level, title, text, meta, next }) {
+function HealthBanner({ level, title, text, next }) {
   const s = LEVEL[level]
   return (
     <div className={cx('flex flex-col gap-4 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5', s.box)}>
@@ -67,9 +67,7 @@ function HealthBanner({ level, title, text, meta, next }) {
         </div>
       </div>
       <div className="flex flex-wrap gap-2 sm:justify-end">
-        <Pill ok={meta?.worker_online}>Worker {meta ? (meta.worker_online ? 'aktif' : 'tidak aktif') : '–'}</Pill>
-        <Pill ok={meta?.s3_enabled}>S3 {meta?.s3_enabled ? 'siap' : 'belum diatur'}</Pill>
-        <Pill ok={!!next}>{next ? `Jadwal ${fmtUntil(next.next_run_at)}` : 'Belum ada jadwal aktif'}</Pill>
+        <Pill ok={!!next}>{next ? `Proses berikutnya ${fmtUntil(next.next_run_at)}` : 'Belum ada jadwal aktif'}</Pill>
       </div>
     </div>
   )
@@ -83,14 +81,14 @@ const SEVERITY = {
   info: { icon: Info, chip: 'bg-blue-50 text-blue-600', label: 'Info' },
 }
 
-function AttentionList({ items }) {
+function AttentionList({ items, emptyText = 'Tidak ada catatan. Semua data aktif sudah terbaru dan lengkap.' }) {
   const [all, setAll] = useState(false)
   const shown = all ? items : items.slice(0, 6)
   if (items.length === 0) {
     return (
       <div className="flex items-center gap-3 px-5 py-6 text-sm text-gray-600">
         <CheckCircle2 className="h-5 w-5 shrink-0 text-brand-600" aria-hidden />
-        Tidak ada yang perlu ditindaklanjuti. Semua job aktif sudah memproses data terbaru tanpa celah atau data ditahan.
+        {emptyText}
       </div>
     )
   }
@@ -136,11 +134,13 @@ function LoadChart({ daily, dataDate }) {
   const top = niceMax(Math.max(...daily.map((d) => d.rows), 0))
   const ticks = [top, top / 2, 0]
   const total = daily.reduce((s, d) => s + d.rows, 0)
+  const unit = 'data'
+  const held = 'ditahan pemeriksaan kualitas'
   return (
     <Card className="overflow-hidden">
       <CardHeader
         icon={BarChart3}
-        title="Data masuk datalake per tanggal"
+        title="Data masuk per tanggal"
         description={`Baris yang sudah diproses per tanggal data · 14 hari · total ${fmtNumber(total)} baris`}
       />
       <div className="px-4 pb-4 pt-5 sm:px-5">
@@ -169,7 +169,7 @@ function LoadChart({ daily, dataDate }) {
                       onMouseLeave={() => setHover(null)}
                       onFocus={() => setHover(i)}
                       onBlur={() => setHover(null)}
-                      aria-label={`${fmtDate(d.date)}: ${fmtNumber(d.rows)} baris, ${d.jobs} job diproses${d.blocked ? `, ${d.blocked} ditahan DQ` : ''}`}
+                      aria-label={`${fmtDate(d.date)}: ${fmtNumber(d.rows)} baris, ${d.jobs} ${unit} diproses${d.blocked ? `, ${d.blocked} ${held}` : ''}`}
                       className="group relative flex h-full flex-1 items-end justify-center px-px focus-visible:outline-none"
                     >
                       {d.jobs === 0 && !d.blocked
@@ -193,8 +193,8 @@ function LoadChart({ daily, dataDate }) {
                   role="status"
                 >
                   <p className="font-semibold">{fmtDate(daily[hover].date)}</p>
-                  <p className="mt-0.5 text-white/80">{fmtNumber(daily[hover].rows)} baris · {daily[hover].jobs} job diproses</p>
-                  {daily[hover].blocked > 0 && <p className="mt-0.5 text-red-200">{daily[hover].blocked} job ditahan DQ</p>}
+                  <p className="mt-0.5 text-white/80">{fmtNumber(daily[hover].rows)} baris · {daily[hover].jobs} {unit} diproses</p>
+                  {daily[hover].blocked > 0 && <p className="mt-0.5 text-red-200">{daily[hover].blocked} {unit} {held}</p>}
                   {daily[hover].jobs === 0 && !daily[hover].blocked && <p className="mt-0.5 text-white/80">Belum ada yang diproses</p>}
                 </div>
               )}
@@ -209,7 +209,7 @@ function LoadChart({ daily, dataDate }) {
                     <span className={cx('text-[11px] tabular-nums', d.date === dataDate ? 'font-semibold text-gray-800' : 'text-gray-400')}>
                       {day}{showMonth && <span className="hidden sm:inline"> {BLN[m - 1]}</span>}
                     </span>
-                    {d.blocked > 0 && <CircleAlert className="h-3 w-3 text-red-500" aria-label="ada yang ditahan DQ" />}
+                    {d.blocked > 0 && <CircleAlert className="h-3 w-3 text-red-500" aria-label={`ada yang ${held}`} />}
                   </div>
                 )
               })}
@@ -217,14 +217,14 @@ function LoadChart({ daily, dataDate }) {
           </div>
         </div>
         <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
-          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-brand-600" aria-hidden /> baris ter-load</span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-brand-600" aria-hidden /> baris masuk</span>
           <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-3 rounded-full bg-gray-300" aria-hidden /> belum ada yang diproses</span>
-          <span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3 w-3 text-red-500" aria-hidden /> ada yang ditahan DQ</span>
+          <span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3 w-3 text-red-500" aria-hidden /> ada yang {held}</span>
         </p>
       </div>
       <table className="sr-only">
-        <caption>Data masuk datalake per tanggal, 14 hari</caption>
-        <thead><tr><th>Tanggal</th><th>Baris</th><th>Job diproses</th><th>Ditahan DQ</th></tr></thead>
+        <caption>Data masuk per tanggal, 14 hari</caption>
+        <thead><tr><th>Tanggal</th><th>Baris</th><th>Data diproses</th><th>Ditahan pemeriksaan kualitas</th></tr></thead>
         <tbody>{daily.map((d) => <tr key={d.date}><td>{d.date}</td><td>{d.rows}</td><td>{d.jobs}</td><td>{d.blocked}</td></tr>)}</tbody>
       </table>
     </Card>
@@ -252,9 +252,8 @@ function QuickAction({ icon: Icon, title, desc, onClick }) {
 
 // --- Halaman ---------------------------------------------------------------------------------------
 
-export default function DashboardPage() {
-  const { user } = useAuth()
-  const navigate = useNavigate()
+/** Data Beranda. */
+function useDashboardData() {
   const { data: runsData, loading } = useApi('/runs?limit=100', {
     refreshMs: (d) => (d?.runs?.some((r) => ACTIVE_STATUSES.includes(r.status)) ? 5000 : 30000),
   })
@@ -262,168 +261,140 @@ export default function DashboardPage() {
   const { data: meta } = useApi('/runs/meta', { refreshMs: 15000 })
   const { data: schedData } = useApi('/schedules', { refreshMs: 60000 })
   const { data: dash } = useApi('/dashboard', { refreshMs: 60000 })
-
-  if (loading && !runsData) return <LoadingBlock />
   const runs = runsData?.runs || []
   const jobs = jobsData?.jobs || []
-  const isOperator = hasRole(user, 'operator')
-  const firstName = (user.full_name || user.username).split(/[\s.]/)[0]
-  const todayLabel = new Date().toLocaleDateString('id-ID', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
-
   const active = jobs.filter((j) => j.enabled)
-  const fresh = active.filter((j) => j.freshness?.status === 'fresh')
-  const late = active.filter((j) => j.freshness?.status === 'late')
-  const unknown = active.filter((j) => j.freshness?.status === 'unknown')
-  const gapJobs = active.filter((j) => j.freshness?.gaps?.count)
   const weekAgo = Date.now() - 7 * 86400e3
   const runs7 = runs.filter((r) => new Date(r.created_at).getTime() >= weekAgo)
-  const failed7 = runs7.filter((r) => ['failed', 'interrupted'].includes(r.status))
-  const running = runs.filter((r) => ACTIVE_STATUSES.includes(r.status))
-  const upcoming = (schedData?.schedules || []).filter((s) => s.enabled && s.next_run_at)
-    .sort((a, b) => a.next_run_at.localeCompare(b.next_run_at)).slice(0, 3)
   const dataDate = dash?.data_date
   const dq = dash?.dq7
-  const judged = dq ? dq.ok + dq.warning + dq.blocked : 0
-  const today = dash?.daily?.find((d) => d.date === dataDate)
+  return {
+    loading: loading && !runsData, runs, jobs, meta, dash, active, runs7, dataDate, dq,
+    fresh: active.filter((j) => j.freshness?.status === 'fresh'),
+    late: active.filter((j) => j.freshness?.status === 'late'),
+    unknown: active.filter((j) => j.freshness?.status === 'unknown'),
+    gapJobs: active.filter((j) => j.freshness?.gaps?.count),
+    failed7: runs7.filter((r) => ['failed', 'interrupted'].includes(r.status)),
+    running: runs.filter((r) => ACTIVE_STATUSES.includes(r.status)),
+    upcoming: (schedData?.schedules || []).filter((s) => s.enabled && s.next_run_at)
+      .sort((a, b) => a.next_run_at.localeCompare(b.next_run_at)).slice(0, 3),
+    judged: dq ? dq.ok + dq.warning + dq.blocked : 0,
+    today: dash?.daily?.find((d) => d.date === dataDate),
+  }
+}
 
-  // Daftar perlu perhatian: paling mendesak dulu.
+const todayLabel = () => new Date().toLocaleDateString('id-ID', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+const firstNameOf = (user) => (user.full_name || user.username).split(/[\s.]/)[0]
+
+// SATU tampilan untuk semua peran, istilah sehari-hari (job -> data, run -> proses, DQ -> pemeriksaan kualitas). Bagian teknis
+// muncul bila server mengirimnya: pesan pemeriksaan DQ (Operator/Admin -- Viewer tidak menerimanya, simple_view.dashboard_issue) dan
+// akun yang menunggu persetujuan unduh (Admin). Tombol & pintasan aksi khusus Operator.
+
+export default function DashboardPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const d = useDashboardData()
+  if (d.loading) return <LoadingBlock />
+  const { runs, meta, dash, active, fresh, late, unknown, gapJobs, runs7, failed7, running, upcoming, dataDate, dq, judged, today } = d
+  const isOperator = hasRole(user, 'operator')
+  const job = (j) => `/jobs/${encodeURIComponent(j)}`
+
   const items = []
   if (meta && !meta.worker_online) {
-    items.push({ key: 'worker', severity: 'critical', title: 'Worker tidak aktif', desc: 'Run & jadwal tertahan di antrian sampai worker.py dijalankan di server.' })
+    items.push({ key: 'worker', severity: 'critical', title: 'Proses otomatis sedang berhenti', desc: 'Data baru belum masuk sampai proses otomatis (worker) berjalan kembali.' })
+  }
+  if (meta && !meta.s3_enabled) {
+    items.push({ key: 's3', severity: 'warning', title: 'Pengiriman ke datalake belum diatur', desc: 'Data diproses tetapi belum dikirim ke datalake (pengaturan penyimpanan S3 di server belum lengkap).' })
   }
   for (const r of failed7.slice(0, 3)) {
-    items.push({ key: `run${r.id}`, severity: 'critical', title: `Run #${r.id} ${r.status === 'interrupted' ? 'terputus' : 'gagal'}`, desc: `${fmtDateRange(r.start_date, r.end_date)} · ${r.failed_items} eksekusi gagal · ${fmtRelative(r.created_at)}`, to: `/runs/${r.id}` })
+    items.push({ key: `run${r.id}`, severity: 'critical', title: `Proses No. ${r.id} ${r.status === 'interrupted' ? 'terputus' : 'gagal'}`, desc: `Tanggal data ${fmtDateRange(r.start_date, r.end_date)} · ${fmtRelative(r.created_at)}`, to: `/runs/${r.id}` })
   }
   for (const b of (dash?.blocked || []).slice(0, 5)) {
-    items.push({ key: `blk${b.job_name}${b.target_date}`, severity: 'critical', title: `Ditahan DQ: ${b.job_name}`, desc: `${fmtDate(b.target_date)} · ${b.message}`, to: b.run_id ? `/runs/${b.run_id}` : `/jobs/${encodeURIComponent(b.job_name)}` })
+    items.push({ key: `blk${b.job_name}${b.target_date}`, severity: 'critical', title: `Ditahan pemeriksaan kualitas: ${b.label}`, desc: `Data ${fmtDate(b.target_date)} belum diterbitkan karena tidak lolos pemeriksaan kualitas.${b.message ? ` ${b.message}` : ''}`, to: b.run_id ? `/runs/${b.run_id}` : job(b.job_name) })
   }
   for (const j of late.slice(0, 5)) {
-    items.push({ key: `late${j.name}`, severity: 'warning', title: `Terlambat: ${j.name}`, desc: `Data terbaru ${fmtDate(j.freshness.latest)} · seharusnya ${fmtDate(j.freshness.expected)}`, to: `/jobs/${encodeURIComponent(j.name)}` })
+    items.push({ key: `late${j.name}`, severity: 'warning', title: `Belum terbaru: ${j.label}`, desc: `Data terakhir ${fmtDate(j.freshness.latest)}, seharusnya sudah ${fmtDate(j.freshness.expected)}.`, to: job(j.name) })
   }
   for (const j of gapJobs.slice(0, 5)) {
     const g = j.freshness.gaps
-    items.push({ key: `gap${j.name}`, severity: 'warning', title: `Ada celah: ${j.name}`, desc: `${g.items[0].label}${g.count > 1 ? ` · +${g.count - 1} periode lain` : ''}`, to: `/jobs/${encodeURIComponent(j.name)}` })
+    items.push({ key: `gap${j.name}`, severity: 'warning', title: `Ada tanggal yang belum masuk: ${j.label}`, desc: `${g.items[0].label}${g.count > 1 ? ` dan ${g.count - 1} periode lain` : ''}`, to: job(j.name) })
   }
   if (late.length > 5 || gapJobs.length > 5) {
-    items.push({ key: 'more', severity: 'warning', title: `${Math.max(late.length - 5, 0) + Math.max(gapJobs.length - 5, 0)} job lain terlambat / ada celah`, desc: 'Lihat Daftar Job dengan filter "Aktif · terlambat" atau "Aktif · ada celah".', to: '/jobs' })
+    items.push({ key: 'more', severity: 'warning', title: `${Math.max(late.length - 5, 0) + Math.max(gapJobs.length - 5, 0)} data lain belum lengkap`, desc: 'Lihat semuanya di Daftar Data.', to: '/jobs' })
   }
   if (dash?.warnings?.length) {
     const w = dash.warnings
-    items.push({ key: 'dqw', severity: 'info', title: `${w.length}${w.length >= 20 ? '+' : ''} peringatan data quality (7 hari)`, desc: w.slice(0, 2).map((x) => `${x.job_name} ${fmtDate(x.target_date)}: ${x.message}`).join(' · '), to: w[0].run_id ? `/runs/${w[0].run_id}` : null })
+    const desc = w[0].message
+      ? w.slice(0, 2).map((x) => `${x.label} ${fmtDate(x.target_date)}: ${x.message}`).join(' · ')
+      : `Data tetap diterbitkan. Contoh: ${[...new Set(w.map((x) => x.label))].slice(0, 3).join(', ')}`
+    items.push({ key: 'dqw', severity: 'info', title: `${w.length}${w.length >= 20 ? '+' : ''} catatan pemeriksaan kualitas (7 hari)`, desc, to: w[0].message && w[0].run_id ? `/runs/${w[0].run_id}` : null })
   }
   if (dash?.pending_export) {
-    items.push({ key: 'pending', severity: 'info', title: `${dash.pending_export} akun baru menunggu persetujuan Ekspor Cepat`, desc: 'Akun daftar otomatis lewat SSO (Viewer). Setujui di halaman Users kalau memang boleh mengunduh data.', to: '/users' })
+    items.push({ key: 'pending', severity: 'info', title: `${dash.pending_export} akun baru menunggu persetujuan Unduh Data`, desc: 'Akun yang daftar otomatis lewat SSO (Viewer). Setujui di halaman Users bila memang boleh mengunduh data.', to: '/users' })
   }
   if (unknown.length) {
-    items.push({ key: 'unknown', severity: 'info', title: `${unknown.length} job aktif belum pernah diproses`, desc: 'Tercatat setelah run pertama dengan versi terbaru — atau periksa jadwalnya.', to: '/jobs' })
+    items.push({ key: 'unknown', severity: 'info', title: `${unknown.length} data belum pernah diproses`, desc: 'Akan terisi setelah proses pertama berjalan.', to: '/jobs' })
   }
 
   const urgent = items.filter((i) => i.severity !== 'info').length
   const level = items.some((i) => i.severity === 'critical') ? 'critical' : urgent ? 'warning' : 'ok'
-  const bannerTitle = level === 'ok' ? 'Datalake terkini & sehat' : `${urgent} hal perlu perhatian`
+  const bannerTitle = level === 'ok' ? 'Semua data sudah terbaru' : `${urgent} hal perlu diketahui`
   const bannerText = level === 'ok'
-    ? `Data ${dataDate ? fmtDate(dataDate) : 'terbaru'} sudah masuk datalake untuk ${fresh.length} dari ${active.length} job aktif, tanpa run gagal atau data ditahan dalam 7 hari.`
-    : 'Lihat daftar "Perlu perhatian" di bawah — mulai dari yang bertanda merah.'
+    ? `Data ${dataDate ? fmtDate(dataDate) : 'terbaru'} sudah tersedia untuk ${fresh.length} dari ${active.length} data.`
+    : 'Rinciannya ada di daftar di bawah, mulai dari yang bertanda merah.'
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-sm text-gray-500">{todayLabel}</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-gray-800">{greeting()}, {firstName}</h1>
-          <p className="mt-1 text-sm text-gray-500">Ringkasan kondisi datalake — kesegaran, kualitas, dan pemuatan data terbaru.</p>
+          <p className="text-sm text-gray-500">{todayLabel()}</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-gray-800">{greeting()}, {firstNameOf(user)}</h1>
+          <p className="mt-1 text-sm text-gray-500">Ringkasan kondisi data terbaru.</p>
         </div>
-        {isOperator && <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan Run</Button>}
+        {isOperator && <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan Proses</Button>}
       </div>
 
-      <HealthBanner level={level} title={bannerTitle} text={bannerText} meta={meta} next={upcoming[0]} />
+      <HealthBanner level={level} title={bannerTitle} text={bannerText} next={upcoming[0]} />
 
-      {running.length > 0 && (
-        <Alert tone="info" title={`${running.length} run sedang berjalan / mengantri`}>
-          {running.slice(0, 3).map((r, i) => (
-            <span key={r.id}>
-              {i > 0 && ', '}
-              <Link to={`/runs/${r.id}`} className="font-medium underline decoration-brand-300 underline-offset-2 hover:decoration-brand-600">Run #{r.id}</Link>
-            </span>
-          ))}
-          {running.length > 3 && ` dan ${running.length - 3} lainnya`}.
-        </Alert>
-      )}
+      {running.length > 0 && <Alert tone="info">{running.length} proses sedang berjalan — data terbaru sedang dimasukkan.</Alert>}
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-        <StatCard
-          icon={Database}
-          tone={late.length ? 'amber' : 'mint'}
-          label={dataDate ? `Data ${fmtDate(dataDate)}` : 'Data terbaru'}
-          value={`${fresh.length}/${active.length}`}
-          sub="job aktif sudah diproses"
-          onClick={() => navigate('/jobs')}
-        >
+        <StatCard icon={Database} tone={late.length ? 'amber' : 'mint'} label={dataDate ? `Data ${fmtDate(dataDate)}` : 'Data terbaru'} value={`${fresh.length}/${active.length}`} sub="data sudah tersedia" onClick={() => navigate('/jobs')}>
           <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-gray-100" aria-hidden>
             <div className="h-full rounded-full bg-brand-500" style={{ width: `${active.length ? (fresh.length / active.length) * 100 : 0}%` }} />
           </div>
         </StatCard>
-        <StatCard
-          icon={ShieldCheck}
-          tone={dq?.blocked ? 'red' : dq?.warning ? 'amber' : 'mint'}
-          label="Kualitas data · 7 hari"
-          value={judged ? `${Math.round((dq.ok / judged) * 100)}% lolos` : '–'}
-          sub={dq ? `${fmtNumber(dq.warning)} peringatan · ${fmtNumber(dq.blocked)} ditahan` : 'memuat…'}
-        />
-        <StatCard
-          icon={Zap}
-          tone={failed7.length ? 'red' : 'blue'}
-          label="Run · 7 hari"
-          value={fmtNumber(runs7.length)}
-          sub={`${fmtNumber(runs7.length - failed7.length)} sukses · ${fmtNumber(failed7.length)} gagal`}
-          onClick={() => navigate('/runs')}
-        />
-        <StatCard
-          icon={Layers}
-          tone="blue"
-          label={dataDate ? `Baris ter-load ${fmtDate(dataDate)}` : 'Baris ter-load'}
-          value={today ? fmtNumber(today.rows) : '–'}
-          sub={today ? `dari ${fmtNumber(today.jobs)} job` : 'memuat…'}
-        />
+        <StatCard icon={ShieldCheck} tone={dq?.blocked ? 'red' : dq?.warning ? 'amber' : 'mint'} label="Pemeriksaan kualitas · 7 hari" value={judged ? `${Math.round((dq.ok / judged) * 100)}% lolos` : '–'} sub={dq ? `${fmtNumber(dq.warning)} catatan · ${fmtNumber(dq.blocked)} ditahan` : 'memuat…'} />
+        <StatCard icon={Zap} tone={failed7.length ? 'red' : 'blue'} label="Proses · 7 hari" value={fmtNumber(runs7.length)} sub={`${fmtNumber(runs7.length - failed7.length)} berhasil · ${fmtNumber(failed7.length)} gagal`} onClick={() => navigate('/runs')} />
+        <StatCard icon={Layers} tone="blue" label={dataDate ? `Baris masuk ${fmtDate(dataDate)}` : 'Baris masuk'} value={today ? fmtNumber(today.rows) : '–'} sub={today ? `dari ${fmtNumber(today.jobs)} data` : 'memuat…'} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="min-w-0 space-y-6 lg:col-span-2">
           <Card className="overflow-hidden">
-            <CardHeader
-              icon={BellRing}
-              title="Perlu perhatian"
-              description="Masalah data & run yang perlu ditindaklanjuti, paling mendesak di atas"
-            />
+            <CardHeader icon={BellRing} title="Perlu diketahui" description="Data yang belum terbaru atau belum lengkap, paling penting di atas" />
             <AttentionList items={items} />
           </Card>
 
           {dash?.daily && <LoadChart daily={dash.daily} dataDate={dataDate} />}
 
           <Card className="overflow-hidden">
-            <CardHeader
-              icon={History}
-              title="Run terbaru"
-              description="Pemuatan data ke datalake lewat Web UI & jadwal"
-              action={<Link to="/runs" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Lihat semua</Link>}
-            />
+            <CardHeader icon={History} title="Proses terbaru" description="Pemasukan data terbaru, otomatis maupun manual" action={<Link to="/runs" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Lihat semua</Link>} />
             {runs.length === 0 ? (
-              <EmptyState icon={History} title="Belum ada run" action={isOperator && <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan run pertama</Button>}>
-                Run yang dijalankan akan tampil di sini.
+              <EmptyState icon={History} title="Belum ada proses" action={isOperator && <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan proses pertama</Button>}>
+                Proses pemasukan data akan tampil di sini.
               </EmptyState>
             ) : (
               <ul className="divide-y divide-gray-100">
                 {runs.slice(0, 5).map((r) => (
                   <li key={r.id}>
-                    {/* mobile: [#id | info | status] lalu progres selebar baris; sm+: satu baris 4 kolom */}
-                    <Link to={`/runs/${r.id}`} className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-2 px-5 py-3.5 transition-colors hover:bg-gray-50 sm:grid-cols-[4rem_1fr_9rem_7rem] sm:gap-x-4">
-                      <span className="text-sm font-semibold text-gray-800">#{r.id}</span>
+                    <Link to={`/runs/${r.id}`} className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 px-5 py-3.5 transition-colors hover:bg-gray-50 sm:grid-cols-[1fr_9rem_7rem] sm:gap-x-4">
                       <span className="min-w-0">
-                        <span className="block truncate text-sm text-gray-700">{fmtDateRange(r.start_date, r.end_date)} · {r.job_count} job</span>
-                        <span className="block truncate text-xs text-gray-500">{fmtCreator(r.created_by)} · {fmtRelative(r.created_at)}</span>
+                        <span className="block truncate text-sm text-gray-700">Data {fmtDateRange(r.start_date, r.end_date)} · {r.job_count} data</span>
+                        <span className="block truncate text-xs text-gray-500">No. {r.id} · {fmtCreator(r.created_by)} · {fmtRelative(r.created_at)}</span>
                       </span>
-                      <span className="col-span-3 sm:col-span-1"><ProgressBar value={r.done_items} total={r.total_items} status={r.status} /></span>
-                      <span className="col-start-3 row-start-1 flex justify-end sm:col-start-auto sm:row-start-auto"><StatusBadge status={r.status} /></span>
+                      <span className="col-span-2 sm:col-span-1"><ProgressBar value={r.done_items} total={r.total_items} status={r.status} /></span>
+                      <span className="col-start-2 row-start-1 flex justify-end sm:col-start-auto sm:row-start-auto"><StatusBadge status={r.status} /></span>
                     </Link>
                   </li>
                 ))}
@@ -434,11 +405,7 @@ export default function DashboardPage() {
 
         <div className="min-w-0 space-y-6">
           <Card className="overflow-hidden">
-            <CardHeader
-              icon={CalendarClock}
-              title="Jadwal berikutnya"
-              action={<Link to="/schedules" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Kelola</Link>}
-            />
+            <CardHeader icon={CalendarClock} title="Proses terjadwal berikutnya" action={<Link to="/schedules" className="shrink-0 whitespace-nowrap text-sm font-medium text-brand-700 hover:text-brand-800">Lihat</Link>} />
             {upcoming.length === 0 ? (
               <p className="px-5 py-4 text-sm text-gray-500">Belum ada jadwal aktif.</p>
             ) : (
@@ -449,7 +416,7 @@ export default function DashboardPage() {
                       <span className="truncate text-sm font-medium text-gray-800">{s.name}</span>
                       <span className="shrink-0 text-xs font-medium text-brand-700">{fmtUntil(s.next_run_at)}</span>
                     </div>
-                    <p className="mt-0.5 text-xs text-gray-500">{fmtDateTime(s.next_run_at)} · {s.window_label} · {s.job_count} job</p>
+                    <p className="mt-0.5 text-xs text-gray-500">{fmtDateTime(s.next_run_at)} · {s.job_count} data</p>
                   </li>
                 ))}
               </ul>
@@ -457,12 +424,14 @@ export default function DashboardPage() {
           </Card>
 
           <Card className="overflow-hidden">
-            <CardHeader title="Aksi cepat" />
+            <CardHeader title="Pintasan" />
             <div className="space-y-2 p-4">
-              {isOperator && <QuickAction icon={Play} title="Jalankan run" desc="Pilih job & tanggal, cek preview" onClick={() => navigate('/runs/new')} />}
-              {isOperator && <QuickAction icon={Plus} title="Tambah job" desc="Wizard dari tabel SQL Server" onClick={() => navigate('/jobs/new')} />}
-              <QuickAction icon={Database} title="Daftar job" desc={`${fmtNumber(jobs.length)} job · konfigurasi, kesegaran & celah`} onClick={() => navigate('/jobs')} />
-              <QuickAction icon={Server} title="Riwayat run" desc="Status, log, dan hasil data quality" onClick={() => navigate('/runs')} />
+              {isOperator && <QuickAction icon={Play} title="Jalankan proses" desc="Pilih data & tanggal, cek pratinjau" onClick={() => navigate('/runs/new')} />}
+              {isOperator && <QuickAction icon={Plus} title="Tambah data" desc="Daftarkan tabel SQL Server baru" onClick={() => navigate('/jobs/new')} />}
+              <QuickAction icon={Database} title="Daftar data" desc={`${fmtNumber(active.length)} data aktif · kesegaran tiap data`} onClick={() => navigate('/jobs')} />
+              <QuickAction icon={History} title="Riwayat proses" desc="Hasil setiap pemasukan data" onClick={() => navigate('/runs')} />
+              <QuickAction icon={BookOpen} title="Knowledge Base" desc="Dokumen untuk asisten AI" onClick={() => navigate('/kb')} />
+              {user.can_export && <QuickAction icon={Download} title="Unduh data" desc="Unduh data per tanggal" onClick={() => navigate('/export')} />}
             </div>
           </Card>
         </div>

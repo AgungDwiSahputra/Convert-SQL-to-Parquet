@@ -2,8 +2,9 @@
 Knowledge Base (PRD v1.1 Fase 10): target KB Bedrock yang dipantau + riwayat ingestion-nya.
 
 Semua pembacaan AWS di sini hanya get/list (cepat, beberapa detik). Proses manual (Cleansing Glue / Sync KB) hanya
-DIANTRIKAN di sini -- worker yang memeriksa syarat dengan data AWS terbaru lalu memulainya (pipeline/kb_actions.py). Viewer boleh
-melihat; muat ulang riwayat & proses manual = operator; mendaftarkan/mengubah/menghapus target = admin.
+DIANTRIKAN di sini -- worker yang memeriksa syarat dengan data AWS terbaru lalu memulainya (pipeline/kb_actions.py). Satu bentuk
+respons untuk semua peran: bagian sederhana (webapp/simple_view.py) + blok `tech`/`actions`/`availability` hanya untuk operator/admin
+(Viewer tidak menerima ID AWS, prefix S3, error mentah). Muat ulang riwayat & proses manual = operator; daftar/ubah/hapus = admin.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ from pydantic import BaseModel, Field
 
 from pipeline import aws, kb_actions, kb_sync, run_store
 from pipeline.app_settings import get_settings
-from webapp.deps import current_user, get_db, require_role
+from webapp import simple_view
+from webapp.deps import current_user, get_db, is_viewer, require_role
 
 router = APIRouter()
 
@@ -68,8 +70,22 @@ def _monitor(db: sqlite3.Connection) -> dict:
 
 
 @router.get("")
-def list_all(_user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    return {"targets": [kb_sync.target_view(db, r) for r in kb_sync.list_targets(db)], "monitor": _monitor(db)}
+def list_all(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    """
+    SATU bentuk respons untuk semua peran (satu tampilan): bagian sederhana (simple_view) untuk semua; blok `tech` (data lengkap)
+    HANYA untuk operator/admin. Viewer juga tidak melihat target nonaktif.
+    """
+    viewer = is_viewer(user)
+    targets = []
+    for r in kb_sync.list_targets(db, enabled_only=viewer):
+        t = simple_view.kb_target(db, r)
+        if not viewer:
+            t["tech"] = {"name": r["name"], "poll_error": r["poll_error"]}
+        targets.append(t)
+    monitor = simple_view.kb_monitor(db)
+    if not viewer:
+        monitor["tech"] = _monitor(db)
+    return {"targets": targets, "monitor": monitor}
 
 
 @router.post("/lookup")
@@ -79,13 +95,20 @@ def lookup(body: LookupIn, _admin: dict = Depends(require_role("admin"))):
 
 
 @router.get("/{target_id}")
-def detail(target_id: int, _user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+def detail(target_id: int, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
     row = kb_sync.get_target(db, target_id)
-    if not row:
+    viewer = is_viewer(user)
+    if not row or (viewer and not row["enabled"]):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Target tidak ditemukan.")
-    return {"target": kb_sync.target_view(db, row), "ingestions": kb_sync.list_ingestions(db, target_id, 50),
-            "monitor": _monitor(db), "actions": kb_actions.list_actions(db, target_id, 10),
-            "availability": kb_actions.availability(db, row, run_store.worker_online(db))}
+    out = {"monitor": simple_view.kb_monitor(db),
+           "target": simple_view.kb_target(db, row, simple_view.kb_raw(db), steps=True),
+           "ingestions": simple_view.kb_ingestions(kb_sync.list_ingestions(db, target_id, 10))}
+    if viewer:
+        return out
+    return out | {"tech": {"target": kb_sync.target_view(db, row), "ingestions": kb_sync.list_ingestions(db, target_id, 50),
+                           "monitor": _monitor(db)},
+                  "actions": kb_actions.list_actions(db, target_id, 10),
+                  "availability": kb_actions.availability(db, row, run_store.worker_online(db))}
 
 
 @router.post("/{target_id}/actions")

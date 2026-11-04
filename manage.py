@@ -21,11 +21,19 @@ Data quality: skema acuan job dilepas supaya perubahan skema sumber yang DISENGA
 Inventaris S3: pindai sekarang tanggal data yang ada di S3 per job aktif (hanya membaca S3; normalnya dijalankan
 worker sekali sehari -- lihat pipeline/s3_inventory.py):
     python manage.py scan-s3
+
+Nama tampilan job (label ramah non-teknis; identifier `name` TIDAK berubah): impor dari CSV berkolom `name` dan `display_name`
+(pemisah ';' atau ','; UTF-8, boleh dari Excel). Tanpa --apply hanya menampilkan rencana perubahan. Sel kosong = tidak diubah,
+'-' = kosongkan (kembali ke label otomatis). Semua tercatat di riwayat job (action 'rename'):
+    python manage.py set-display-names nama-tampilan-job.csv
+    python manage.py set-display-names nama-tampilan-job.csv --apply
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import sqlite3
 import sys
 
@@ -49,6 +57,9 @@ def main() -> int:
     sub.add_parser("list-users", help="tampilkan semua user")
     sub.add_parser("accept-schema", help="lepas skema acuan DQ sebuah job").add_argument("job")
     sub.add_parser("scan-s3", help="pindai inventaris S3 sekarang")
+    d = sub.add_parser("set-display-names", help="impor nama tampilan job dari CSV (name;display_name)")
+    d.add_argument("csv_file")
+    d.add_argument("--apply", action="store_true", help="tulis perubahan (tanpa ini hanya rencana)")
     args = p.parse_args()
 
     try:
@@ -61,6 +72,8 @@ def main() -> int:
         return accept_schema(db, args.job)
     if args.cmd == "scan-s3":
         return scan_s3(db)
+    if args.cmd == "set-display-names":
+        return set_display_names_cmd(db, args.csv_file, args.apply)
     username = getattr(args, "username", "").strip().lower()
 
     if args.cmd == "add-user":
@@ -113,6 +126,66 @@ def scan_s3(db: sqlite3.Connection) -> int:
     if r["error"]:
         print(f"ERROR: {r['error']}")
     return 1 if r["error"] or r["errors"] else 0
+
+
+def _read_display_csv(path: str) -> list[dict]:
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        text = f.read()
+    try:
+        dialect = csv.Sniffer().sniff(text.splitlines()[0] if text else "", delimiters=";,")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.DictReader(io.StringIO(text), dialect=dialect))
+    if rows and not {"name", "display_name"} <= set(rows[0]):
+        raise ValueError("CSV wajib punya kolom 'name' dan 'display_name'.")
+    return rows
+
+
+def set_display_names_cmd(db: sqlite3.Connection, path: str, apply: bool) -> int:
+    from pipeline.job_store import JobRow, load_job_rows, set_display_names
+    from pipeline.job_validation import validate_display_name
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")   # konsol cp1252: nama tampilan bebas karakter tidak boleh membuat crash
+    try:
+        entries = _read_display_csv(path)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        print(f"ERROR: {e}")
+        return 1
+    current = {r.name: r for r in load_job_rows(enabled_only=False)}
+    wanted: dict[str, str | None] = {}
+    errors: list[str] = []
+    for i, e in enumerate(entries, start=2):            # baris 1 = header
+        name, value = (e.get("name") or "").strip(), " ".join((e.get("display_name") or "").split())
+        if not name or not value:
+            continue                                    # sel kosong = tidak diubah
+        if name not in current:
+            errors.append(f"baris {i}: job '{name}' tidak ada")
+        elif name in wanted:
+            errors.append(f"baris {i}: job '{name}' muncul dua kali")
+        else:
+            wanted[name] = None if value == "-" else value
+    # Validasi terhadap KONDISI AKHIR (semua perubahan diterapkan) -- tukar nama antar-job tetap sah.
+    final = [JobRow(**{**r.__dict__, "display_name": wanted.get(r.name, r.display_name)}) for r in current.values()]
+    for name, value in wanted.items():
+        msg = validate_display_name(value, final, name)
+        if msg:
+            errors.append(f"{name}: {msg}")
+    changes = [(current[n], v) for n, v in wanted.items() if current[n].display_name != v]
+    for old, value in changes:
+        print(f"  {old.name:<48} {old.display_name or '(otomatis: ' + old.label + ')'}  ->  {value or '(otomatis)'}")
+    print(f"{len(changes)} berubah, {len(wanted) - len(changes)} sudah sama, {len(current) - len(wanted)} job tidak diubah.")
+    if errors:
+        print("ERROR (tidak ada yang ditulis):")
+        for m in errors:
+            print(f"  {m}")
+        return 1
+    if not apply:
+        print("Belum ditulis -- jalankan ulang dengan --apply untuk menyimpan.")
+        return 0
+    if changes:
+        set_display_names(db, changes, "manage.py")
+    print(f"Tersimpan: {len(changes)} nama tampilan.")
+    return 0
 
 
 if __name__ == "__main__":

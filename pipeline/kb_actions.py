@@ -1,5 +1,6 @@
 """
-KB ACTIONS -- proses manual jalur dokumen (PRD v1.1 Fase 10 irisan 4): tombol "Cleansing Glue" dan "Sync Knowledge Base".
+KB ACTIONS -- proses manual jalur dokumen (PRD v1.1 Fase 10 irisan 4): tombol "Jalankan pembersihan" (job Glue cleansing) dan
+"Perbarui sekarang" (ingestion Knowledge Base).
 
 Alur: web hanya MENGANTRIKAN permintaan (request) -- tidak pernah memanggil AWS. Worker (thread scheduler, tiap ~20 detik) mengambil
 antrian (process), memeriksa ULANG syarat dengan data AWS terbaru (evaluate_guards), lalu memulai prosesnya. Permintaan yang tidak
@@ -37,7 +38,8 @@ from pipeline.scheduler import WIB
 
 log = logging.getLogger("parquet_exporter")
 
-ACTIONS = {"glue_run": "Cleansing Glue", "ingestion": "Sync Knowledge Base"}
+# Label tampilan (istilah sederhana, sama untuk semua peran); kunci = nilai kolom kb_actions.action.
+ACTIONS = {"glue_run": "Pembersihan dokumen", "ingestion": "Pembaruan Knowledge Base"}
 INGESTION_ACTIVE = ("STARTING", "IN_PROGRESS", "STOPPING")
 QUEUE_EXPIRY = timedelta(minutes=10)
 # Eksekusi hanya beberapa detik; baris 'running' setua ini = worker berhenti di tengah proses (tanpa ini tombol terkunci selamanya).

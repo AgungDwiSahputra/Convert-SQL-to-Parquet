@@ -4,6 +4,34 @@
 // '' = Web UI di root. Dipakai juga sebagai basename React Router (main.jsx).
 export const BASE_PATH = new URL(document.baseURI).pathname.replace(/\/$/, '')
 
+// Pratinjau tampilan Viewer (khusus admin): disimpan per TAB (sessionStorage) -- tutup tab = kembali normal. Server
+// memperlakukan admin + header ini persis sebagai Viewer (data disaring, aksi ditolak); role lain mengabaikannya.
+const PREVIEW_KEY = 'pqx_view_as'
+
+export function getPreview() {
+  try {
+    return sessionStorage.getItem(PREVIEW_KEY) === 'viewer'
+  } catch {
+    return false
+  }
+}
+
+export function setPreviewFlag(on) {
+  try {
+    if (on) sessionStorage.setItem(PREVIEW_KEY, 'viewer')
+    else sessionStorage.removeItem(PREVIEW_KEY)
+  } catch {
+    // storage diblokir: pratinjau tidak tersedia, tampilan tetap normal
+  }
+}
+
+function headers(json) {
+  const h = {}
+  if (json) h['Content-Type'] = 'application/json'
+  if (getPreview()) h['X-View-As'] = 'viewer'
+  return h
+}
+
 export class ApiError extends Error {
   constructor(status, message, detail = null) {
     super(message)
@@ -29,7 +57,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     res = await fetch(`${BASE_PATH}/api${path}`, {
       method,
       credentials: 'same-origin',
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      headers: headers(body !== undefined),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   } catch {
@@ -57,7 +85,7 @@ export async function apiDownload(path, body) {
     res = await fetch(`${BASE_PATH}/api${path}`, {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers(true),
       body: JSON.stringify(body),
     })
   } catch {
