@@ -160,6 +160,23 @@ def schedule(s: dict, labels: list[str]) -> dict:
     return {k: s.get(k) for k in _SCHEDULE_FIELDS} | {"job_labels": labels}
 
 
+# --- Unduh Data (ekspor cepat) ----------------------------------------------------------------------
+
+def adhoc_job(row, needs_date: bool) -> dict:
+    """Pilihan data yang bisa diunduh: nama tampilan, tanpa template / database / tabel sumber."""
+    return {"name": row.name, "label": row.label, "needs_date": needs_date}
+
+
+def adhoc_history(h: dict, labels: dict[str, str]) -> dict:
+    """Satu unduhan: nama tampilan (mode job) atau sumber tabel bebas (hanya milik operator sendiri); tanpa pesan error mentah."""
+    label = labels.get(h["source"], h["source"]) if h["mode"] == "job" else "Tabel bebas"
+    return {k: h.get(k) for k in ("id", "mode", "target_date", "rows", "truncated", "size_bytes", "status", "created_at")} | {
+        "label": label}
+
+
+ADHOC_FAILED = "Data belum bisa diunduh saat ini. Coba lagi beberapa saat lagi, atau hubungi operator bila terus terjadi."
+
+
 # --- Beranda ----------------------------------------------------------------------------------------
 
 def dashboard_issue(issue: dict) -> dict:

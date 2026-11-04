@@ -354,8 +354,11 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   Viewer yang daftar otomatis belum boleh Ekspor Cepat (`users.can_export = 0`) sampai admin menyalakan
   saklar **Ekspor** di halaman Users; jumlah yang menunggu tampil di Users, Pengaturan, dan Beranda admin.
   User yang ditambahkan admin langsung boleh.
-- **Satu tampilan untuk semua peran** (bahasa sehari-hari untuk pengguna non-teknis; redesain bertahap — sudah: Beranda,
-  Knowledge Base, Riwayat Proses, Daftar Data, Jadwal). Keputusan pemilik: dua versi UI per peran terlalu mahal dirawat.
+- **Satu tampilan untuk semua peran** (bahasa sehari-hari untuk pengguna non-teknis — Beranda, Knowledge Base, Riwayat Proses,
+  Daftar Data, Jadwal, Unduh Data). Keputusan pemilik: dua versi UI per peran terlalu mahal dirawat.
+  - Unduh Data (`/adhoc/meta`): pilihan data & riwayat unduhan dengan nama tampilan; template/database/tabel sumber dan sumber/error
+    riwayat hanya di `tech`. Ekspor gagal: Viewer menerima pesan ramah (`simple_view.ADHOC_FAILED`), operator/admin pesan asli;
+    error asli selalu tercatat di `adhoc_exports`.
   - Daftar Data & Jadwal: `/jobs` dan `/schedules` = bagian sederhana (`simple_view.job_summary` / `schedule`: nama tampilan,
     kesegaran, frekuensi, kelompok; kapan & hasil terakhir) + blok `tech` (definisi lengkap/selector/opsi) untuk operator/admin.
     Halaman operator (form job, Jalankan Proses, form jadwal) memakai `withTech()` (`lib/jobs.js`) = `{...x, ...x.tech}`.

@@ -7,6 +7,9 @@ import { fmtBytes, fmtDate, fmtNumber, fmtRelative } from '../lib/format'
 import { ColumnSelect, DbSelect, TablePicker } from '../components/schema'
 import { Alert, Badge, Button, Card, CardHeader, Field, LoadingBlock, PageHeader, cx, inputClass } from '../components/ui'
 
+// SATU tampilan untuk semua peran: pilih data (nama tampilan) + tanggal, unduh. Tabel sumber, template, dan error mentah tampil
+// kecil bila server mengirim blok `tech` (Operator/Admin). Tab "Tabel bebas" khusus Operator (juga dijaga server).
+
 function Tabs({ value, onChange, tabs }) {
   return (
     <div className="mb-6 inline-grid gap-1 rounded-lg bg-white p-1 shadow-card ring-1 ring-gray-200/80" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }} role="tablist">
@@ -29,28 +32,30 @@ function Tabs({ value, onChange, tabs }) {
 
 function Result({ result }) {
   if (!result) return null
-  if (result.error) return <Alert tone="error" title="Ekspor gagal">{result.error}</Alert>
+  if (result.error) return <Alert tone="error" title="Unduhan gagal">{result.error}</Alert>
   return (
     <Alert tone={result.truncated ? 'warning' : 'info'} title={`${result.name} terunduh`}>
       {fmtNumber(result.rows)} baris · {fmtBytes(result.size)} · {result.elapsed} dtk.
-      {result.truncated && ` Data dipotong pada batas ${fmtNumber(result.maxRows)} baris — untuk data lengkap pakai run biasa (Jalankan).`}
+      {result.truncated && ` Data dipotong pada batas ${fmtNumber(result.maxRows)} baris — data lengkap tetap tersedia di datalake.`}
     </Alert>
   )
 }
+
+const source = (j) => (j.tech?.table ? `${j.tech.db}.dbo.${j.tech.table}` : null)
 
 function JobPicker({ jobs, value, onChange }) {
   const [q, setQ] = useState('')
   const shown = useMemo(() => {
     const s = q.trim().toLowerCase()
-    return (s ? jobs.filter((j) => j.name.includes(s) || (j.table || '').toLowerCase().includes(s)) : jobs).slice(0, 150)
+    return (s ? jobs.filter((j) => [j.label, j.name, j.tech?.table].some((v) => v && v.toLowerCase().includes(s))) : jobs).slice(0, 150)
   }, [jobs, q])
   const selected = jobs.find((j) => j.name === value)
   if (selected) {
     return (
       <div className="flex items-center justify-between gap-3 rounded-lg bg-brand-50 px-3 py-2.5">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-brand-900">{selected.name}</p>
-          {selected.table && <p className="truncate font-mono text-xs text-brand-800/70">{selected.db}.dbo.{selected.table}</p>}
+          <p className="truncate text-sm font-semibold text-brand-900">{selected.label}</p>
+          {source(selected) && <p className="truncate font-mono text-xs text-brand-800/70">{source(selected)}</p>}
         </div>
         <button type="button" onClick={() => onChange(null)} className="shrink-0 text-xs font-medium text-brand-700 hover:underline">Ganti</button>
       </div>
@@ -60,25 +65,27 @@ function JobPicker({ jobs, value, onChange }) {
     <div className="space-y-2">
       <div className="relative">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden />
-        <input id="adhoc-job" type="search" className={`${inputClass} pl-9`} placeholder="Cari nama job atau tabel…" value={q} onChange={(e) => setQ(e.target.value)} autoComplete="off" />
+        <input id="adhoc-job" type="search" className={`${inputClass} pl-9`} placeholder="Cari nama data…" value={q} onChange={(e) => setQ(e.target.value)} autoComplete="off" />
       </div>
       <ul className="max-h-72 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
         {shown.map((j) => (
           <li key={j.name}>
             <button type="button" onClick={() => onChange(j.name)} className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-gray-50">
               <span className="min-w-0">
-                <span className="block truncate text-sm font-medium text-gray-800">{j.name}</span>
-                {j.table && <span className="block truncate font-mono text-xs text-gray-500">{j.db}.dbo.{j.table}</span>}
+                <span className="block truncate text-sm font-medium text-gray-800">{j.label}</span>
+                {source(j) && <span className="block truncate font-mono text-xs text-gray-500">{source(j)}</span>}
               </span>
-              <Badge tone={j.needs_date ? 'mint' : 'blue'}>{j.needs_date ? 'Harian' : 'Master'}</Badge>
+              <Badge tone={j.needs_date ? 'mint' : 'blue'}>{j.needs_date ? 'Per tanggal' : 'Master'}</Badge>
             </button>
           </li>
         ))}
-        {shown.length === 0 && <li className="p-3 text-sm text-gray-500">Tidak ada job yang cocok.</li>}
+        {shown.length === 0 && <li className="p-3 text-sm text-gray-500">Tidak ada data yang cocok.</li>}
       </ul>
     </div>
   )
 }
+
+const DESCRIPTION = 'Unduh data untuk satu tanggal sebagai file .parquet — format yang sama dengan data di datalake.'
 
 export default function AdhocPage() {
   const { user } = useAuth()
@@ -98,10 +105,10 @@ export default function AdhocPage() {
   if (meta && !meta.export_allowed) {
     return (
       <>
-        <PageHeader title="Ekspor Cepat" description="Unduh data sebagai .parquet langsung dari SQL Server — tanpa membuat job dan tanpa menyentuh S3 datalake." />
+        <PageHeader title="Unduh Data" description={DESCRIPTION} />
         <Alert tone="warning" title="Menunggu persetujuan admin">
-          Akun Anda masuk otomatis sebagai Viewer lewat SSO. Ekspor Cepat bisa dipakai setelah admin aplikasi menyetujuinya
-          di halaman Users. Daftar job, riwayat run, dan log tetap bisa dilihat.
+          Fitur Unduh Data bisa dipakai setelah admin aplikasi menyetujui akun Anda. Halaman lain (Beranda, Daftar Data, Riwayat Proses,
+          Knowledge Base) tetap bisa dilihat.
         </Alert>
       </>
     )
@@ -124,17 +131,17 @@ export default function AdhocPage() {
 
   return (
     <>
-      <PageHeader title="Ekspor Cepat" description="Unduh data sebagai .parquet langsung dari SQL Server — tanpa membuat job dan tanpa menyentuh S3 datalake." />
-      {error && <Alert tone="error" className="mb-4">{error.message}</Alert>}
+      <PageHeader title="Unduh Data" description={DESCRIPTION} />
+      {error && <Alert tone="error" className="mb-4">Halaman ini belum bisa dimuat. Coba lagi beberapa saat lagi.</Alert>}
       {isOperator && (
-        <Tabs value={tab} onChange={(t) => { setTab(t); setResult(null) }} tabs={[['job', 'Dari job', Database], ['table', 'Tabel bebas', Table2]]} />
+        <Tabs value={tab} onChange={(t) => { setTab(t); setResult(null) }} tabs={[['job', 'Data terdaftar', Database], ['table', 'Tabel bebas', Table2]]} />
       )}
 
       <div className="grid gap-6 lg:grid-cols-5">
         <Card className="lg:col-span-3">
           {tab === 'job' ? (
             <div className="space-y-5 p-5">
-              <Field label="Job" htmlFor="adhoc-job" hint="Data yang bisa diunduh = data job yang terdaftar & aktif.">
+              <Field label="Data" htmlFor="adhoc-job" hint="Hanya data yang terdaftar & aktif yang bisa diunduh.">
                 <JobPicker jobs={meta?.jobs || []} value={jobName} onChange={setJobName} />
               </Field>
               {job?.needs_date !== false && (
@@ -142,9 +149,9 @@ export default function AdhocPage() {
                   <input id="adhoc-date" type="date" className={`${inputClass} max-w-52`} value={theDate || ''} onChange={(e) => setDate(e.target.value)} />
                 </Field>
               )}
-              {job && !job.needs_date && <p className="text-sm text-gray-500">Job master — seluruh isi tabel saat ini diunduh.</p>}
+              {job && !job.needs_date && <p className="text-sm text-gray-500">Data master — seluruh isinya saat ini diunduh.</p>}
               <Button icon={Download} loading={busy} disabled={!job} onClick={() => download('/adhoc/job', { job_name: job.name, target_date: job.needs_date ? theDate : null })}>
-                Download .parquet
+                Unduh .parquet
               </Button>
               <Result result={result} />
             </div>
@@ -169,7 +176,7 @@ export default function AdhocPage() {
                 </Field>
               )}
               <Button icon={Download} loading={busy} disabled={!db || !table} onClick={() => download('/adhoc/table', { db, table, date_col: dateCol || null, target_date: dateCol ? theDate : null })}>
-                Download .parquet
+                Unduh .parquet
               </Button>
               <Result result={result} />
             </div>
@@ -178,10 +185,11 @@ export default function AdhocPage() {
 
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-brand-100 bg-brand-50 p-5 text-sm leading-relaxed text-brand-900/80">
-            <p className="flex items-center gap-2 font-semibold text-brand-900"><FileDown className="h-4 w-4 text-brand-600" aria-hidden /> Tentang ekspor cepat</p>
+            <p className="flex items-center gap-2 font-semibold text-brand-900"><FileDown className="h-4 w-4 text-brand-600" aria-hidden /> Tentang unduhan</p>
             <ul className="mt-2 list-disc space-y-1 pl-5">
               <li>Maks <strong>{fmtNumber(meta?.max_rows)}</strong> baris per file — lebih dari itu dipotong.</li>
-              <li>Skema sama dengan file di datalake (termasuk kolom <span className="font-mono text-xs">_ingested_at</span>).</li>
+              <li>Isi kolom sama dengan file di datalake, termasuk kolom waktu data dimasukkan.</li>
+              <li>File .parquet bisa dibuka dengan Power BI, Python, atau DuckDB.</li>
               <li>Setiap unduhan tercatat atas nama Anda.</li>
             </ul>
           </div>
@@ -192,14 +200,15 @@ export default function AdhocPage() {
                 {meta.history.map((h) => (
                   <li key={h.id} className="px-5 py-3">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="truncate text-sm font-medium text-gray-800">{h.source}</span>
+                      <span className="truncate text-sm font-medium text-gray-800">{h.label}</span>
                       <Badge tone={h.status === 'success' ? (h.truncated ? 'amber' : 'mint') : 'gray'}>
                         {h.status === 'success' ? (h.truncated ? 'Terpotong' : 'Lengkap') : 'Gagal'}
                       </Badge>
                     </div>
                     <p className="mt-0.5 text-xs text-gray-500">
-                      {h.target_date ? fmtDate(h.target_date) : 'seluruh tabel'} · {fmtNumber(h.rows)} baris · {fmtRelative(h.created_at)}
+                      {h.target_date ? fmtDate(h.target_date) : 'seluruh isi'} · {fmtNumber(h.rows)} baris · {fmtRelative(h.created_at)}
                     </p>
+                    {h.tech && <p className="mt-0.5 truncate font-mono text-[11px] text-gray-400" title={h.tech.error || h.tech.source}>{h.tech.source}{h.tech.error ? ` · ${h.tech.error}` : ''}</p>}
                   </li>
                 ))}
               </ul>

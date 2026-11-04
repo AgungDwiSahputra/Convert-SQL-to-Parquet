@@ -29,7 +29,8 @@ from pipeline.job_store import build_jobs, default_target_date, get_job_row, loa
 from pipeline.job_templates import build_job
 from pipeline.job_validation import ROLE_RANK, TEMPLATE_SPECS, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, export_parquet
-from webapp.deps import can_quick_export, current_user, get_db, require_role
+from webapp import simple_view
+from webapp.deps import can_quick_export, current_user, get_db, is_viewer, require_role
 
 router = APIRouter()
 
@@ -66,10 +67,10 @@ def _run_export(db, user, job, mode, source, target_date, filename) -> FileRespo
     except TestRunBusy as e:
         os.remove(path)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(e))
-    except Exception as e:  # noqa: BLE001 -- error SQL/konversi -> tampilkan & catat
+    except Exception as e:  # noqa: BLE001 -- error SQL/konversi -> catat; Viewer: pesan ramah, operator/admin: pesan asli
         os.remove(path)
         _log(db, user, mode, source, target_date, error=str(e)[:500])
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Ekspor gagal: {e}")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, simple_view.ADHOC_FAILED if is_viewer(user) else f"Ekspor gagal: {e}")
     size = os.path.getsize(path)
     _log(db, user, mode, source, target_date, result, size=size)
     return FileResponse(path, media_type="application/vnd.apache.parquet", filename=filename,
@@ -80,29 +81,40 @@ def _run_export(db, user, job, mode, source, target_date, filename) -> FileRespo
 
 @router.get("/meta")
 def meta(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    """
+    SATU bentuk respons: pilihan data & riwayat unduhan dengan nama tampilan untuk semua peran; blok `tech` (template, database,
+    tabel sumber; sumber & error mentah riwayat) hanya operator/admin.
+    """
     allowed = can_quick_export(user)
+    technical = not is_viewer(user)
     rows = load_job_rows() if allowed else []
+    labels = {r.name: r.label for r in load_job_rows(enabled_only=False)}
     example = default_target_date()
     jobs = []
     for r, j in zip(rows, build_jobs(example, rows)):
         if _downloadable(user["role"], r.template):
-            jobs.append({"name": r.name, "needs_date": j.needs_date, "template": r.template,
-                         "table": r.args.get("table"), "db": r.args.get("db")})
-    mine = db.execute("SELECT * FROM adhoc_exports WHERE username = ? ORDER BY id DESC LIMIT 15",
-                      (user["username"],)).fetchall()
-    return {"max_rows": ADHOC_MAX_ROWS, "default_date": example, "jobs": jobs, "history": [dict(m) for m in mine],
-            "export_allowed": allowed}
+            item = simple_view.adhoc_job(r, j.needs_date)
+            if technical:
+                item["tech"] = {"template": r.template, "table": r.args.get("table"), "db": r.args.get("db")}
+            jobs.append(item)
+    history = []
+    for m in db.execute("SELECT * FROM adhoc_exports WHERE username = ? ORDER BY id DESC LIMIT 15", (user["username"],)):
+        item = simple_view.adhoc_history(dict(m), labels)
+        if technical:
+            item["tech"] = {"source": m["source"], "error": m["error"]}
+        history.append(item)
+    return {"max_rows": ADHOC_MAX_ROWS, "default_date": example, "jobs": jobs, "history": history, "export_allowed": allowed}
 
 
 @router.post("/job")
 def export_job(body: JobExportIn, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
     if not can_quick_export(user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Ekspor Cepat untuk akun ini menunggu persetujuan admin.")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Unduh Data untuk akun ini menunggu persetujuan admin.")
     row = get_job_row(db, body.job_name)
     if row is None or not row.enabled:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Job aktif '{body.job_name}' tidak ditemukan.")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Data ini tidak tersedia untuk diunduh.")
     if not _downloadable(user["role"], row.template):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Job ini memakai template khusus admin.")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Data ini hanya bisa diunduh admin.")
     target = (body.target_date or date.fromisoformat(default_target_date())).isoformat()
     job = build_job(row.name, row.template, row.args, target)
     suffix = f"_{target.replace('-', '')}" if job.needs_date else f"_snapshot_{target.replace('-', '')}"
