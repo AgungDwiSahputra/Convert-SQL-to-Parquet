@@ -355,7 +355,16 @@ Browser (React) ──▶ webapp/ (FastAPI) ──▶ jobs.db (SQLite WAL) ◀�
   saklar **Ekspor** di halaman Users; jumlah yang menunggu tampil di Users, Pengaturan, dan Beranda admin.
   User yang ditambahkan admin langsung boleh.
 - **Satu tampilan untuk semua peran** (bahasa sehari-hari untuk pengguna non-teknis; redesain bertahap — sudah: Beranda,
-  Knowledge Base). Keputusan pemilik: dua versi UI per peran terlalu mahal dirawat.
+  Knowledge Base, Riwayat Proses, Daftar Data, Jadwal). Keputusan pemilik: dua versi UI per peran terlalu mahal dirawat.
+  - Daftar Data & Jadwal: `/jobs` dan `/schedules` = bagian sederhana (`simple_view.job_summary` / `schedule`: nama tampilan,
+    kesegaran, frekuensi, kelompok; kapan & hasil terakhir) + blok `tech` (definisi lengkap/selector/opsi) untuk operator/admin.
+    Halaman operator (form job, Jalankan Proses, form jadwal) memakai `withTech()` (`lib/jobs.js`) = `{...x, ...x.tech}`.
+    Viewer hanya melihat job aktif (job nonaktif = 404). `/schedules/preview` khusus operator. Nama tampilan bisa diubah di form job
+    (langkah "Tujuan & nama"; `/jobs/validate` mengembalikan `auto_label` untuk petunjuk "kosong = otomatis").
+  - Riwayat Proses: daftar = ringkasan allowlist yang sama untuk semua peran (`simple_view.run_summary`, tanpa opsi & error mentah);
+    detail = item dengan nama tampilan + blok `tech` per item/proses untuk operator/admin (identifier job, key S3, ukuran, error,
+    rincian DQ, opsi). `args` (snapshot definisi job berisi query) tidak dikirim ke siapa pun. Log (`/runs/{id}/log`) hanya
+    operator/admin. `/runs/meta` untuk Viewer tanpa nama bucket & opsi. Pencarian mencocokkan identifier ATAU nama tampilan.
   - SATU komponen per halaman. Perbedaan peran hanya TAMBAHAN: tombol aksi (role-gated, seperti sebelumnya) dan bagian
     **"Detail teknis"** (`TechDetails` di `components/ui.jsx`: bisa dibuka-tutup, default tertutup, diingat per browser) yang
     dirender bila datanya ada — jadi satu jalur kode, tanpa cabang "kalau Viewer begini".

@@ -3,7 +3,11 @@
 export const NO_MODULE = '(tanpa modul)'
 export const TYPE_LABEL = { daily: 'Harian', weekly: 'Mingguan', monthly: 'Bulanan', master: 'Master' }
 
+/** Bagian sederhana + blok `tech` (operator/admin) jadi satu objek -- untuk halaman operator (form job, Jalankan Proses, form jadwal). */
+export const withTech = (x) => (x?.tech ? { ...x, ...x.tech } : x)
+
 export function jobType(job) {
+  if (job.kind) return job.kind // dihitung server (bagian sederhana)
   if (!job.needs_date) return 'master'
   const layout = job.s3?.layout
   return layout === 'weekly' || layout === 'monthly' ? layout : 'daily'
@@ -133,6 +137,7 @@ export const HISTORY_LABEL = {
   enable: 'Diaktifkan',
   disable: 'Dinonaktifkan',
   s3_move: 'Path S3 dipindah',
+  rename: 'Nama tampilan diubah',
 }
 
 const show = (v) => (v === undefined || v === null || v === '' ? '–' : typeof v === 'object' ? JSON.stringify(v) : String(v))
@@ -141,9 +146,10 @@ const show = (v) => (v === undefined || v === null || v === '' ? '–' : typeof 
 export function diffSnapshots(before, after) {
   if (!before || !after) return []
   const out = []
-  for (const k of ['template', 'enabled', 'notes', 'cadence']) {
+  for (const k of ['display_name', 'template', 'enabled', 'notes', 'cadence']) {
     if (JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)) {
       if (k === 'notes') out.push({ field: 'catatan', from: '…', to: '(diubah)' })
+      else if (k === 'display_name') out.push({ field: 'nama tampilan', from: before[k] || 'otomatis', to: after[k] || 'otomatis' })
       else if (k === 'cadence') out.push({ field: 'irama', from: CADENCE_LABEL[before[k]] || 'otomatis', to: CADENCE_LABEL[after[k]] || 'otomatis' })
       else out.push({ field: k, from: show(before[k]), to: show(after[k]) })
     }

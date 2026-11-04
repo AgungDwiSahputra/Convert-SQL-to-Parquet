@@ -14,7 +14,7 @@ const STATUS_FILTERS = [
   ['', 'Semua status'],
   ['active', 'Berjalan / mengantri', 'queued,running'],
   ['problem', 'Bermasalah (gagal / terputus)', 'failed,interrupted'],
-  ['success', 'Sukses', 'success'],
+  ['success', 'Berhasil', 'success'],
   ['failed', 'Gagal', 'failed'],
   ['interrupted', 'Terputus', 'interrupted'],
   ['cancelled', 'Dibatalkan', 'cancelled'],
@@ -119,10 +119,10 @@ export default function RunsPage() {
   return (
     <>
       <PageHeader
-        title="Riwayat Run"
-        description="Semua ekspor yang dijalankan lewat Web UI, terbaru di atas."
+        title="Riwayat Proses"
+        description="Semua proses pemasukan data ke datalake, otomatis maupun manual — terbaru di atas."
         actions={hasRole(user, 'operator') && (
-          <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan Run Baru</Button>
+          <Button icon={Play} onClick={() => navigate('/runs/new')}>Jalankan Proses</Button>
         )}
       />
       {error && <Alert tone="error" className="mb-4">{error.message}</Alert>}
@@ -132,15 +132,15 @@ export default function RunsPage() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_15rem_15rem]">
             <div className="relative sm:col-span-2 lg:col-span-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden />
-              <input type="search" aria-label="Cari run" placeholder="Cari nama job atau nomor run (#123)…" className={`${inputClass} pl-9`} value={qInput} onChange={(e) => onSearch(e.target.value)} />
+              <input type="search" aria-label="Cari proses" placeholder="Cari nama data atau nomor proses (#123)…" className={`${inputClass} pl-9`} value={qInput} onChange={(e) => onSearch(e.target.value)} />
             </div>
             <select aria-label="Filter status" className={selectClass} value={params.get('status') || ''} onChange={(e) => update({ status: e.target.value })}>
               {STATUS_FILTERS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </select>
-            <select aria-label="Filter pembuat run" className={selectClass} value={params.get('by') || ''} onChange={(e) => update({ by: e.target.value })}>
+            <select aria-label="Filter pembuat proses" className={selectClass} value={params.get('by') || ''} onChange={(e) => update({ by: e.target.value })}>
               <option value="">Semua pembuat</option>
-              <option value="@schedule">Semua jadwal otomatis</option>
-              <option value="@manual">Semua run manual</option>
+              <option value="@schedule">Semua proses terjadwal</option>
+              <option value="@manual">Semua proses manual</option>
               {creators.schedules.length > 0 && (
                 <optgroup label="Jadwal">
                   {creators.schedules.map((n) => <option key={n} value={n}>{n.slice(7)}</option>)}
@@ -156,13 +156,13 @@ export default function RunsPage() {
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
             <DateRange
               label="Tanggal data"
-              title="Tanggal data yang diekspor (kolom Tanggal data): run yang rentang datanya beririsan dengan rentang ini"
+              title="Tanggal data yang diproses (kolom Tanggal data): proses yang rentang datanya beririsan dengan rentang ini"
               from={params.get('from') || ''} to={params.get('to') || ''}
               onFrom={(v) => update({ from: v })} onTo={(v) => update({ to: v })}
             />
             <DateRange
               label="Dibuat"
-              title="Tanggal run dibuat/dijalankan (kolom Dibuat), menurut kalender WIB"
+              title="Tanggal proses dibuat/dijalankan (kolom Dibuat), menurut kalender WIB"
               from={params.get('cfrom') || ''} to={params.get('cto') || ''}
               onFrom={(v) => update({ cfrom: v })} onTo={(v) => update({ cto: v })}
             />
@@ -178,7 +178,7 @@ export default function RunsPage() {
           filtered || total > 0 ? (
             <EmptyState
               icon={SearchX}
-              title={total > 0 ? 'Halaman ini kosong' : 'Tidak ada run yang cocok'}
+              title={total > 0 ? 'Halaman ini kosong' : 'Tidak ada proses yang cocok'}
               action={total > 0
                 ? <Button variant="secondary" onClick={() => goPage(1)}>Ke halaman pertama</Button>
                 : <Button variant="secondary" icon={X} onClick={reset}>Reset filter</Button>}
@@ -186,8 +186,8 @@ export default function RunsPage() {
               {total === 0 && 'Ubah kata kunci, status, pembuat, atau rentang tanggalnya.'}
             </EmptyState>
           ) : (
-            <EmptyState icon={History} title="Belum ada run">
-              {hasRole(user, 'operator') ? 'Mulai dengan menekan "Jalankan Run Baru".' : 'Run yang dijalankan operator akan tampil di sini.'}
+            <EmptyState icon={History} title="Belum ada proses">
+              {hasRole(user, 'operator') ? 'Mulai dengan menekan "Jalankan Proses".' : 'Proses pemasukan data akan tampil di sini.'}
             </EmptyState>
           )
         ) : (
@@ -197,10 +197,10 @@ export default function RunsPage() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-200 bg-gray-50/80 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                    <th className="px-4 py-3">Run</th>
+                    <th className="px-4 py-3">No.</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Tanggal data</th>
-                    <th className="px-4 py-3 text-right">Job</th>
+                    <th className="px-4 py-3 text-right">Data</th>
                     <th className="w-48 px-4 py-3">Progres</th>
                     <th className="px-4 py-3 text-right">Baris</th>
                     <th className="px-4 py-3 text-right">Durasi</th>
@@ -220,7 +220,7 @@ export default function RunsPage() {
                           #{r.id}
                         </Link>
                         {r.retry_of && (
-                          <span className="ml-2 inline-flex items-center gap-1 text-xs text-gray-500" title={`Ulangan dari run #${r.retry_of}`}>
+                          <span className="ml-2 inline-flex items-center gap-1 text-xs text-gray-500" title={`Ulangan dari proses No. ${r.retry_of}`}>
                             <RotateCcw className="h-3 w-3" aria-hidden />#{r.retry_of}
                           </span>
                         )}
@@ -248,12 +248,12 @@ export default function RunsPage() {
                 <li key={r.id}>
                   <Link to={`/runs/${r.id}`} state={back} className="block space-y-3 px-4 py-4 active:bg-gray-50">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="font-medium text-gray-800">Run #{r.id}</span>
+                      <span className="font-medium text-gray-800">Proses No. {r.id}</span>
                       <StatusBadge status={r.status} />
                     </div>
                     <div className="flex justify-between text-sm text-gray-600">
                       <span>{fmtDateRange(r.start_date, r.end_date)}</span>
-                      <span>{r.job_count} job · {fmtNumber(r.total_rows)} baris</span>
+                      <span>{r.job_count} data · {fmtNumber(r.total_rows)} baris</span>
                     </div>
                     <ProgressBar value={r.done_items} total={r.total_items} status={r.status} />
                     <p className="text-xs text-gray-500">{fmtCreator(r.created_by)} · {fmtRelative(r.created_at)}</p>
@@ -265,7 +265,7 @@ export default function RunsPage() {
             <div className="flex flex-col gap-3 border-t border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-gray-500">
                 Menampilkan <span className="tabular-nums">{fmtNumber(first)}–{fmtNumber(last)}</span> dari{' '}
-                <span className="tabular-nums">{fmtNumber(total)}</span> run{filtered && ' yang cocok'}
+                <span className="tabular-nums">{fmtNumber(total)}</span> proses{filtered && ' yang cocok'}
               </p>
               {pages > 1 && (
                 <div className="flex items-center gap-2">

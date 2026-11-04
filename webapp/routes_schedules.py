@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from pipeline import scheduler
 from pipeline.job_store import load_job_rows
-from webapp.deps import current_user, get_db, require_role
+from webapp import simple_view
+from webapp.deps import current_user, get_db, is_viewer, require_role
 from webapp.routes_runs import RunOptionsIn
 
 router = APIRouter()
@@ -74,13 +75,26 @@ def _enrich(s: dict, rows) -> dict:
 
 
 @router.get("")
-def list_schedules(_user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+def list_schedules(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    """
+    SATU bentuk respons: bagian sederhana (simple_view.schedule: kapan, hasil terakhir, nama tampilan data) untuk semua peran;
+    blok `tech` (selector, opsi, pesan terakhir, isi form) hanya operator/admin -- form jadwal menggabungkan `{...s, ...s.tech}`.
+    """
     rows = load_job_rows()
-    return {"schedules": [_enrich(s, rows) for s in scheduler.list_schedules(db)]}
+    labels = {r.name: r.label for r in rows}
+    out = []
+    for s in scheduler.list_schedules(db):
+        full = _enrich(s, rows)
+        item = simple_view.schedule(full, [labels.get(n, n) for n in full["job_names"]])
+        if not is_viewer(user):
+            item["tech"] = full
+        out.append(item)
+    return {"schedules": out}
 
 
 @router.post("/preview")
-def preview(selector: SelectorIn, _user: dict = Depends(current_user)):
+def preview(selector: SelectorIn, _user: dict = Depends(require_role("operator"))):
+    """Pratinjau cakupan untuk form jadwal (operator)."""
     jobs = scheduler.resolve_selector(selector.model_dump(), load_job_rows())
     return {"count": len(jobs), "jobs": [j.name for j in jobs[:100]], "snapshot_count": _snapshot_count(jobs)}
 

@@ -1,8 +1,8 @@
 """
 Daftar, detail, tambah, ubah, aktif/nonaktif & uji coba job.
 
-Lihat: viewer+. Ubah: operator+ untuk template bronze_*, admin untuk template khusus admin
-(lihat job_validation.TEMPLATE_SPECS). Semua perubahan tercatat di job_history.
+Lihat: viewer+ (Viewer: hanya job aktif, bagian sederhana -- tanpa blok `tech`). Ubah: operator+ untuk template bronze_*,
+admin untuk template khusus admin (lihat job_validation.TEMPLATE_SPECS). Semua perubahan tercatat di job_history.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ from pipeline.job_templates import (
 )
 from pipeline.job_validation import TEMPLATE_SPECS, can_edit, validate_display_name, validate_job
 from webapp.catalog import CATALOG, CatalogError, TestRunBusy, count_rows, test_run
-from webapp.deps import current_user, get_db, require_role
+from webapp import simple_view
+from webapp.deps import current_user, get_db, is_viewer, require_role
 
 router = APIRouter()
 
@@ -59,7 +60,22 @@ class TestRunIn(BaseModel):
     limit: int = Field(100, ge=1, le=500)
 
 
-def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
+def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None, technical: bool = True) -> dict:
+    """
+    SATU bentuk respons: bagian sederhana (simple_view.job_summary) untuk semua peran + blok `tech` (definisi lengkap) hanya untuk
+    operator/admin. Halaman operator (form job, Jalankan Proses, form jadwal) menggabungkan `{...job, ...job.tech}`.
+    """
+    s3 = s3_target_info(row.template, row.args)
+    layout = (s3 or {}).get("layout")
+    kind = "master" if not job.needs_date else (layout if layout in ("weekly", "monthly") else "daily")
+    module = (s3 or {}).get("module") or row.args.get("module")
+    out = simple_view.job_summary(row, kind, str(module).upper() if module else None, fresh)
+    if technical:
+        out["tech"] = _tech_dict(row, job, role, s3)
+    return out
+
+
+def _tech_dict(row: JobRow, job, role: str, s3: dict | None) -> dict:
     try:
         s3_key = job.s3_key({}) if job.s3_key else None
     except KeyError:  # layout mingguan: path baru diketahui dari data
@@ -76,13 +92,11 @@ def _job_dict(row: JobRow, job, role: str, fresh: dict | None = None) -> dict:
         "args": row.args,
         "needs_date": job.needs_date,
         "output": job.output,
-        "s3": s3_target_info(row.template, row.args),
+        "s3": s3,
         "s3_folder": s3_folder(row.template, row.args),
         "s3_key_example": s3_key,
         "s3_locked_at": row.s3_locked_at,
         "cadence": row.cadence,
-        "cadence_effective": row.effective_cadence,
-        "freshness": fresh,
         "updated_by": row.updated_by,
         "updated_at": row.updated_at,
         "can_edit": can_edit(role, row.template),
@@ -120,11 +134,13 @@ def _get_or_404(db: sqlite3.Connection, name: str) -> JobRow:
 
 @router.get("")
 def list_jobs(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    rows = load_job_rows(enabled_only=False)
+    viewer = is_viewer(user)
+    rows = load_job_rows(enabled_only=viewer)   # Viewer: hanya data aktif
     example_date = default_target_date()
     fresh = freshness.job_freshness(db, rows)
     return {"example_date": example_date,
-            "jobs": [_job_dict(r, j, user["role"], fresh[r.name]) for r, j in zip(rows, build_jobs(example_date, rows))]}
+            "jobs": [_job_dict(r, j, user["role"], fresh[r.name], technical=not viewer)
+                     for r, j in zip(rows, build_jobs(example_date, rows))]}
 
 
 @router.get("/templates")
@@ -150,7 +166,8 @@ def validate(body: JobDraft, user: dict = Depends(require_role("operator")), db:
     except Exception:  # noqa: BLE001 -- draf belum lengkap
         cadence = None
     out = {**v.as_dict(), "default_cadence": cadence,
-           "label": job_label(body.name, body.args, _display_name(body, original))}
+           "label": job_label(body.name, body.args, _display_name(body, original)),
+           "auto_label": job_label(body.name, body.args, None)}   # label bila nama tampilan dikosongkan (petunjuk form)
     dn_error = validate_display_name(_display_name(body, original), rows, original.name if original else body.name)
     if dn_error:
         out["errors"] = {**out.get("errors", {}), "display_name": dn_error}
@@ -210,17 +227,25 @@ def test_run_endpoint(body: TestRunIn, user: dict = Depends(require_role("operat
 
 @router.get("/{name}")
 def get_job(name: str, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    viewer = is_viewer(user)
     row = _get_or_404(db, name)
+    if viewer and not row.enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Job '{name}' tidak ditemukan.")
     job = build_jobs(default_target_date(), [row])[0]
-    recent = db.execute("SELECT i.run_id, i.target_date, i.status, i.rows, i.s3_key, i.finished_at, i.dq_status, "
-                        "r.created_by FROM run_items i JOIN runs r ON r.id = i.run_id WHERE i.job_name = ? "
-                        "ORDER BY i.id DESC LIMIT 10", (name,)).fetchall()
+    recent = [dict(r) for r in db.execute(
+        "SELECT i.run_id, i.target_date, i.status, i.rows, i.s3_key, i.finished_at, i.dq_status, "
+        "r.created_by FROM run_items i JOIN runs r ON r.id = i.run_id WHERE i.job_name = ? "
+        "ORDER BY i.id DESC LIMIT 10", (name,))]
+    out = _job_dict(row, job, user["role"], freshness.job_freshness(db, [row])[name], technical=not viewer)
+    out["recent_runs"] = simple_view.job_runs(recent)
+    if viewer:
+        return out
     base = db.execute("SELECT schema_json, schema_updated_at FROM jobs WHERE name = ?", (name,)).fetchone()
     schema = json.loads(base["schema_json"]) if base["schema_json"] else None
-    return {**_job_dict(row, job, user["role"], freshness.job_freshness(db, [row])[name]), "query": job.query,
-            "history": job_history(db, name), "recent_runs": [dict(r) for r in recent],
-            "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None,
-            "snapshots": master_snapshot_history(db, name) if job.change_snapshot else None}
+    out["tech"] |= {"query": job.query, "history": job_history(db, name), "recent_runs": recent,
+                    "schema_baseline": {"columns": len(schema), "updated_at": base["schema_updated_at"]} if schema else None,
+                    "snapshots": master_snapshot_history(db, name) if job.change_snapshot else None}
+    return out
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

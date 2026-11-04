@@ -216,10 +216,11 @@ def _filter_sql(f: RunFilter) -> tuple[str, list]:
     q = (f.q or "").strip()
     if q:
         num = q.removeprefix("#")
-        # instr, bukan LIKE: '_' di nama job (bronze_xxx) bukan wildcard.
-        where.append("(r.id = ? OR EXISTS (SELECT 1 FROM run_items j WHERE j.run_id = r.id "
-                     "AND instr(lower(j.job_name), lower(?)) > 0))")
-        params += [int(num) if num.isascii() and num.isdigit() and len(num) <= 18 else None, q]
+        # instr, bukan LIKE: '_' di nama job (bronze_xxx) bukan wildcard. Cocok ke identifier ATAU nama tampilan job.
+        where.append("(r.id = ? OR EXISTS (SELECT 1 FROM run_items j LEFT JOIN jobs b ON b.name = j.job_name "
+                     "WHERE j.run_id = r.id AND (instr(lower(j.job_name), lower(?)) > 0 "
+                     "OR instr(lower(COALESCE(b.display_name, '')), lower(?)) > 0)))")
+        params += [int(num) if num.isascii() and num.isdigit() and len(num) <= 18 else None, q, q]
     if f.date_from:
         where.append("r.end_date >= ?")
         params.append(f.date_from.isoformat())

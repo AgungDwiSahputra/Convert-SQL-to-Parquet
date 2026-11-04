@@ -5,9 +5,10 @@ import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi, useDebounced } from '../lib/hooks'
 import { fmtDateTime, fmtRelative, fmtUntil } from '../lib/format'
-import { CADENCE_LABEL, NO_MODULE } from '../lib/jobs'
+import { CADENCE_LABEL, NO_MODULE, withTech } from '../lib/jobs'
 import {
-  Alert, Badge, Button, Card, EmptyState, Field, IconChip, LoadingBlock, Modal, PageHeader, StatusBadge, Switch, Toggle, cx, inputClass,
+  Alert, Badge, Button, Card, EmptyState, Field, IconChip, LoadingBlock, Modal, PageHeader, StatusBadge, Switch, TechDetails, Toggle, cx,
+  inputClass,
 } from '../components/ui'
 
 const WEEKDAYS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min']
@@ -69,7 +70,7 @@ function ScheduleForm({ initial, onClose, onSaved }) {
   const [error, setError] = useState(null)
   const [preview, setPreview] = useState(null)
   const { data: jobsData } = useApi('/jobs')
-  const jobs = useMemo(() => (jobsData?.jobs || []).filter((j) => j.enabled), [jobsData])
+  const jobs = useMemo(() => (jobsData?.jobs || []).map(withTech).filter((j) => j.enabled), [jobsData])
   const modules = useMemo(() => [...new Set(jobs.map((j) => j.s3?.module).filter(Boolean))].sort(), [jobs])
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
@@ -88,7 +89,7 @@ function ScheduleForm({ initial, onClose, onSaved }) {
     return () => { stale = true }
   }, [debouncedSel])
 
-  const visibleJobs = jobs.filter((j) => !jobSearch.trim() || j.name.includes(jobSearch.trim().toLowerCase()))
+  const visibleJobs = jobs.filter((j) => { const q = jobSearch.trim().toLowerCase(); return !q || j.name.includes(q) || (j.label || '').toLowerCase().includes(q) })
 
   const save = async () => {
     setSaving(true)
@@ -230,14 +231,14 @@ function ScheduleForm({ initial, onClose, onSaved }) {
               <div className="space-y-2">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden />
-                  <input aria-label="Cari job" className={`${inputClass} pl-9`} placeholder="Cari job…" value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} />
+                  <input aria-label="Cari job" className={`${inputClass} pl-9`} placeholder="Cari nama data atau identifier…" value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} />
                 </div>
                 <ul className="max-h-52 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
                   {visibleJobs.map((j) => (
                     <li key={j.name}>
                       <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-gray-50">
                         <input type="checkbox" className="h-4 w-4 accent-brand-600" checked={form.selector.jobs.includes(j.name)} onChange={() => setSel({ jobs: toggleIn(form.selector.jobs, j.name) })} />
-                        <span className="truncate text-gray-700">{j.name}</span>
+                        <span className="min-w-0 truncate text-gray-700">{j.label || j.name} <span className="font-mono text-[11px] text-gray-400">{j.name}</span></span>
                       </label>
                     </li>
                   ))}
@@ -324,19 +325,21 @@ export default function SchedulesPage() {
     <>
       <PageHeader
         title="Jadwal"
-        description="Run otomatis pada jam tertentu (WIB). Dieksekusi worker dan tercatat di Riwayat Run."
+        description="Proses pemasukan data yang berjalan otomatis pada jam tertentu (WIB). Hasilnya tercatat di Riwayat Proses."
         actions={canEdit && <Button icon={Plus} onClick={() => setEditing({})}>Tambah Jadwal</Button>}
       />
-      {error && <Alert tone="error" className="mb-4">{error.message}</Alert>}
+      {error && <Alert tone="error" className="mb-4">Jadwal belum bisa dimuat. Coba lagi beberapa saat lagi.</Alert>}
       {message && <Alert tone={message.tone} className="mb-4">{message.text}</Alert>}
-      <Alert tone="info" className="mb-6">
-        Selama jadwal lama di Task Scheduler (<span className="font-mono">run_exporter.bat</span>) masih aktif, jangan aktifkan jadwal yang mencakup job yang sama — ekspor akan berjalan dobel.
-      </Alert>
+      {canEdit && (
+        <Alert tone="info" className="mb-6">
+          Selama jadwal lama di Task Scheduler (<span className="font-mono">run_exporter.bat</span>) masih aktif, jangan aktifkan jadwal yang mencakup job yang sama — ekspor akan berjalan dobel.
+        </Alert>
+      )}
 
       {schedules.length === 0 ? (
         <Card>
           <EmptyState icon={CalendarClock} title="Belum ada jadwal" action={canEdit && <Button icon={Plus} onClick={() => setEditing({})}>Tambah jadwal pertama</Button>}>
-            Buat jadwal supaya ekspor berjalan otomatis setiap hari tanpa perlu dijalankan manual.
+            {canEdit ? 'Buat jadwal supaya data masuk otomatis setiap hari tanpa perlu dijalankan manual.' : 'Jadwal proses otomatis akan tampil di sini.'}
           </EmptyState>
         </Card>
       ) : (
@@ -359,8 +362,11 @@ export default function SchedulesPage() {
 
               <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2">
                 <div>
-                  <dt className="text-xs text-gray-500">Cakupan</dt>
-                  <dd className="mt-0.5 break-words text-gray-800">{selectorLabel(s.selector)} <span className="text-gray-500">· {s.job_count} job</span></dd>
+                  <dt className="text-xs text-gray-500">Data yang diproses</dt>
+                  <dd className="mt-0.5 break-words text-gray-800" title={s.job_labels.join('\n')}>
+                    {s.job_count} data
+                    {s.job_labels.length > 0 && <span className="text-gray-500"> · {s.job_labels.slice(0, 2).join(', ')}{s.job_count > 2 ? `, +${s.job_count - 2} lainnya` : ''}</span>}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-gray-500">Tanggal data</dt>
@@ -375,19 +381,33 @@ export default function SchedulesPage() {
                   <dd className="mt-0.5 flex items-center gap-2 text-gray-800">
                     {s.last_run_id ? (
                       <>
-                        <Link to={`/runs/${s.last_run_id}`} className="font-medium text-brand-700 hover:underline">Run #{s.last_run_id}</Link>
+                        <Link to={`/runs/${s.last_run_id}`} className="font-medium text-brand-700 hover:underline">Proses No. {s.last_run_id}</Link>
                         {s.last_run_status && <StatusBadge status={s.last_run_status} />}
                       </>
                     ) : s.last_run_at ? fmtRelative(s.last_run_at) : 'Belum pernah'}
                   </dd>
                 </div>
               </dl>
-              {s.last_message && <p className="mt-3 text-xs text-gray-500">{s.last_message}</p>}
 
-              {canEdit && (
-                <div className="mt-5 flex flex-wrap gap-2 border-t border-gray-100 pt-4">
+              {s.tech && (
+                <TechDetails storageKey="sched-tech" className="-mx-5 mt-4" summary="cakupan job, opsi, pesan terakhir">
+                  <dl className="space-y-2 text-xs">
+                    <div><dt className="text-gray-500">Cakupan</dt><dd className="mt-0.5 break-words text-gray-800">{selectorLabel(s.tech.selector)}</dd></div>
+                    <div>
+                      <dt className="text-gray-500">Opsi</dt>
+                      <dd className="mt-0.5 text-gray-800">
+                        {s.tech.options.skip_s3 ? 'Tanpa upload S3' : 'Upload S3'} · {s.tech.options.skip_local ? 'tanpa simpan lokal' : 'simpan lokal'} · {s.tech.options.stop_on_error ? 'berhenti saat gagal' : 'lanjut saat gagal'}
+                      </dd>
+                    </div>
+                    {s.tech.last_message && <div><dt className="text-gray-500">Pesan terakhir</dt><dd className="mt-0.5 text-gray-800">{s.tech.last_message}</dd></div>}
+                  </dl>
+                </TechDetails>
+              )}
+
+              {canEdit && s.tech && (
+                <div className="mt-auto flex flex-wrap gap-2 border-t border-gray-100 pt-4">
                   <Button size="sm" variant="soft" icon={Play} loading={busy === `r${s.id}`} onClick={() => runNow(s)}>Jalankan sekarang</Button>
-                  <Button size="sm" variant="secondary" icon={Pencil} onClick={() => setEditing(s)}>Edit</Button>
+                  <Button size="sm" variant="secondary" icon={Pencil} onClick={() => setEditing(withTech(s))}>Edit</Button>
                   <Button size="sm" variant="ghost" icon={Trash2} className="text-red-600 hover:bg-red-50 hover:text-red-700" onClick={() => setDeleting(s)}>Hapus</Button>
                 </div>
               )}

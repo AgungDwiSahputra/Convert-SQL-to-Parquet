@@ -116,6 +116,50 @@ def kb_raw(db: sqlite3.Connection) -> dict | None:
     return get_settings(db, "kb.")["kb.raw_status"]
 
 
+# --- Riwayat proses (run) ---------------------------------------------------------------------------
+
+_RUN_FIELDS = ("id", "status", "created_by", "created_at", "started_at", "finished_at", "start_date", "end_date", "retry_of",
+               "cancel_requested", "total_items", "ok_items", "failed_items", "done_items", "job_count", "total_rows")
+_ITEM_FIELDS = ("id", "seq", "target_date", "status", "rows", "elapsed_s", "started_at", "finished_at", "dq_status")
+
+
+def run_summary(run: dict) -> dict:
+    """Satu proses (daftar & kepala detail): tanpa opsi teknis (batch/kompresi/S3) dan tanpa pesan error mentah."""
+    return {k: run.get(k) for k in _RUN_FIELDS} | {"has_error": bool(run.get("error"))}
+
+
+def run_item(item: dict, labels: dict[str, str]) -> dict:
+    """Satu data dalam proses: nama tampilan, bukan identifier/key S3/error mentah/rincian pemeriksaan."""
+    return {k: item.get(k) for k in _ITEM_FIELDS} | {"label": labels.get(item["job_name"], item["job_name"]),
+                                                     "has_error": bool(item.get("error"))}
+
+
+# --- Daftar data (job) & jadwal ---------------------------------------------------------------------
+
+def job_summary(row, kind: str, group: str | None, fresh: dict | None) -> dict:
+    """
+    Satu data (job) untuk semua peran: nama tampilan + kesegaran + irama. `name` = identifier untuk URL/aksi (bukan untuk
+    ditampilkan sebagai judul). Tanpa template, argumen/query, path S3, catatan teknis, pengubah terakhir.
+    """
+    return {"name": row.name, "label": row.label, "enabled": row.enabled, "kind": kind,
+            "cadence_effective": row.effective_cadence, "group": group, "freshness": fresh}
+
+
+def job_runs(recent: list[dict]) -> list[dict]:
+    """Proses terakhir satu data: tanpa key S3."""
+    return [{k: r.get(k) for k in ("run_id", "target_date", "status", "rows", "finished_at", "created_by", "dq_status")}
+            for r in recent]
+
+
+_SCHEDULE_FIELDS = ("id", "name", "enabled", "description", "window_label", "next_run_at", "last_run_at", "last_run_id",
+                    "last_run_status", "job_count")
+
+
+def schedule(s: dict, labels: list[str]) -> dict:
+    """Satu jadwal: kapan & hasil terakhir + nama tampilan data yang dicakup; tanpa selector (pola/modul), opsi, pesan mentah."""
+    return {k: s.get(k) for k in _SCHEDULE_FIELDS} | {"job_labels": labels}
+
+
 # --- Beranda ----------------------------------------------------------------------------------------
 
 def dashboard_issue(issue: dict) -> dict:

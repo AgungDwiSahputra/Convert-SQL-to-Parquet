@@ -162,7 +162,7 @@ const STATUS = {
   queued: ['Mengantri', 'bg-gray-100 text-gray-600', 'bg-gray-400'],
   pending: ['Menunggu', 'bg-gray-100 text-gray-500', 'bg-gray-300'],
   running: ['Berjalan', 'bg-blue-50 text-blue-700', 'bg-blue-600'],
-  success: ['Sukses', 'bg-brand-50 text-brand-700', 'bg-brand-500'],
+  success: ['Berhasil', 'bg-brand-50 text-brand-700', 'bg-brand-500'],
   failed: ['Gagal', 'bg-red-50 text-red-700', 'bg-red-500'],
   cancelled: ['Dibatalkan', 'bg-gray-100 text-gray-600', 'bg-gray-400'],
   skipped: ['Dilewati', 'bg-gray-100 text-gray-500', 'bg-gray-300'],
@@ -192,10 +192,10 @@ const BADGE_TONE = {
   amber: 'bg-amber-50 text-amber-700',
 }
 
-// Hasil data quality per item run (pipeline/dq.py): ok | warning | blocked | unchecked.
+// Hasil pemeriksaan kualitas (data quality) per item proses (pipeline/dq.py): ok | warning | blocked | unchecked.
 const DQ_STATUS = {
   ok: ['Lolos', 'bg-brand-50 text-brand-700'],
-  warning: ['Peringatan', 'bg-amber-50 text-amber-700'],
+  warning: ['Ada catatan', 'bg-amber-50 text-amber-700'],
   blocked: ['Ditahan', 'bg-red-50 text-red-700'],
   unchecked: ['Tidak dicek', 'bg-gray-100 text-gray-500'],
 }
@@ -211,7 +211,7 @@ export function DqBadge({ status }) {
 
 // Kesegaran data job (pipeline/freshness.py): fresh | late | unknown.
 const FRESHNESS = {
-  fresh: ['Segar', 'bg-brand-50 text-brand-700'],
+  fresh: ['Terbaru', 'bg-brand-50 text-brand-700'],
   late: ['Terlambat', 'bg-red-50 text-red-700'],
   unknown: ['Belum ada data', 'bg-gray-100 text-gray-500'],
 }
@@ -220,8 +220,8 @@ export function FreshnessBadge({ freshness }) {
   if (!freshness) return null
   const [label, classes] = FRESHNESS[freshness.status] || FRESHNESS.unknown
   const title = freshness.latest
-    ? `Data terbaru ${freshness.latest} · seharusnya ≥ ${freshness.expected}`
-    : `Belum ada tanggal yang diproses · seharusnya ${freshness.expected}`
+    ? `Data terakhir ${freshness.latest} · seharusnya sudah ${freshness.expected}`
+    : `Belum ada tanggal yang masuk · seharusnya ${freshness.expected}`
   return (
     <span title={title} className={cx('inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium', classes)}>
       {label}{freshness.status === 'late' && freshness.lag_days ? ` · ${freshness.lag_days} hari` : ''}
@@ -229,7 +229,7 @@ export function FreshnessBadge({ freshness }) {
   )
 }
 
-// Celah data (pipeline/freshness.find_gaps): tanggal/minggu/bulan di tengah riwayat yang belum ter-load.
+// Celah data (pipeline/freshness.find_gaps): tanggal/minggu/bulan di tengah riwayat yang belum masuk ("belum lengkap").
 export function GapBadge({ gaps }) {
   if (!gaps?.count) return null
   return (
@@ -237,7 +237,7 @@ export function GapBadge({ gaps }) {
       title={gaps.items.map((g) => g.label).join('\n')}
       className="inline-flex items-center whitespace-nowrap rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700"
     >
-      Ada celah · {gaps.count}
+      Belum lengkap · {gaps.count}
     </span>
   )
 }

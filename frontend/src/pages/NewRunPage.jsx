@@ -5,7 +5,7 @@ import { api } from '../lib/api'
 import { useApi } from '../lib/hooks'
 import { fmtDate, fmtDateRange, fmtNumber } from '../lib/format'
 import { Alert, Badge, Button, Card, EmptyState, Field, LoadingBlock, Modal, PageHeader, Toggle, inputClass } from '../components/ui'
-import { NO_MODULE, TYPE_LABEL, jobType } from '../lib/jobs'
+import { NO_MODULE, TYPE_LABEL, jobType, withTech } from '../lib/jobs'
 
 const selectClass = `${inputClass} pr-8`
 
@@ -30,7 +30,8 @@ function JobRow({ job, checked, onToggle }) {
           className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-brand-600 accent-brand-600 focus:ring-brand-500"
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-gray-800">{job.name}</p>
+          <p className="truncate text-sm font-medium text-gray-800">{job.label || job.name}</p>
+          <p className="truncate font-mono text-[11px] text-gray-400">{job.name}</p>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <Badge tone={t === 'master' ? 'blue' : 'mint'}>
               {TYPE_LABEL[t]}
@@ -53,7 +54,7 @@ function PreviewModal({ preview, onClose, onSubmit, submitting, error }) {
       open
       onClose={onClose}
       size="xl"
-      title="Konfirmasi run"
+      title="Konfirmasi proses"
       description={`${fmtNumber(preview.total_items)} eksekusi · ${preview.job_count} job · ${preview.date_count} tanggal`}
       footer={
         <>
@@ -123,7 +124,7 @@ export default function NewRunPage() {
   const [params] = useSearchParams()
   const { data: jobsData, error: jobsError, loading } = useApi('/jobs')
   const { data: meta } = useApi('/runs/meta')
-  const jobs = useMemo(() => (jobsData?.jobs || []).filter((j) => j.enabled), [jobsData])
+  const jobs = useMemo(() => (jobsData?.jobs || []).map(withTech).filter((j) => j.enabled), [jobsData])
 
   const [selected, setSelected] = useState(() => new Set((params.get('jobs') || '').split(',').filter(Boolean)))
   const [search, setSearch] = useState('')
@@ -161,7 +162,7 @@ export default function NewRunPage() {
       if (moduleFilter !== 'all' && (j.s3?.module || NO_MODULE) !== moduleFilter) return false
       if (typeFilter !== 'all' && jobType(j) !== typeFilter) return false
       if (!q) return true
-      return [j.name, j.template, j.s3?.module, j.s3?.dataset].some((v) => v && v.toLowerCase().includes(q))
+      return [j.label, j.name, j.template, j.s3?.module, j.s3?.dataset].some((v) => v && v.toLowerCase().includes(q))
     })
   }, [jobs, search, moduleFilter, typeFilter])
 
@@ -211,7 +212,7 @@ export default function NewRunPage() {
 
   return (
     <>
-      <PageHeader title="Jalankan Run" description="Pilih job dan tanggal data, cek preview, lalu antrikan. Worker akan mengeksekusinya di server." />
+      <PageHeader title="Jalankan Proses" description="Pilih job dan tanggal data, cek preview, lalu antrikan. Worker akan mengeksekusinya di server." />
       {jobsError && <Alert tone="error" className="mb-4">{jobsError.message}</Alert>}
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -231,7 +232,7 @@ export default function NewRunPage() {
                 <input
                   type="search"
                   aria-label="Cari job"
-                  placeholder="Cari nama job, modul, dataset…"
+                  placeholder="Cari nama data, identifier, modul, dataset…"
                   className={`${inputClass} pl-9`}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -251,7 +252,7 @@ export default function NewRunPage() {
             </div>
           </div>
           {visible.length === 0 ? (
-            <EmptyState icon={Database} title="Tidak ada job yang cocok">Ubah kata kunci atau filter.</EmptyState>
+            <EmptyState icon={Database} title="Tidak ada data yang cocok">Ubah kata kunci atau filter.</EmptyState>
           ) : (
             <ul className="max-h-[32rem] divide-y divide-gray-100 overflow-y-auto lg:max-h-[calc(100vh-17rem)]">
               {visible.map((j) => <JobRow key={j.name} job={j} checked={selected.has(j.name)} onToggle={() => toggle(j.name)} />)}

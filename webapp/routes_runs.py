@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from pipeline import run_store
 from pipeline.config import BATCH_SIZE, COMPRESSION, S3_BUCKET_NAME, S3_CONFIGURED
 from pipeline.job_store import default_target_date, load_job_rows
-from webapp.deps import current_user, get_db, require_role
+from webapp import simple_view
+from webapp.deps import current_user, get_db, is_viewer, require_role
 
 router = APIRouter()
 
@@ -69,16 +70,17 @@ def _plan(body: RunIn, db: sqlite3.Connection) -> tuple[list[run_store.PlannedIt
 
 
 @router.get("/meta")
-def meta(_user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    return {
+def meta(user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    out = {
         "default_date": default_target_date(),
-        "default_options": RunOptionsIn().model_dump(),
-        "compression_options": ["zstd", "snappy", "gzip", "none"],
         "s3_enabled": _s3_enabled(),
-        "s3_bucket": S3_BUCKET_NAME,
         "worker_online": run_store.worker_online(db),
         "max_range_days": MAX_RANGE_DAYS,
     }
+    if is_viewer(user):   # Viewer: tanpa nama bucket & opsi teknis (hanya dipakai form Jalankan Proses / detail teknis)
+        return out
+    return out | {"default_options": RunOptionsIn().model_dump(), "compression_options": ["zstd", "snappy", "gzip", "none"],
+                  "s3_bucket": S3_BUCKET_NAME}
 
 
 @router.post("/preview")
@@ -126,7 +128,9 @@ def list_runs(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
     if unknown:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Status tidak dikenal: {', '.join(unknown)}")
     filt = run_store.RunFilter(statuses, source, created_by, q, date_from, date_to, created_from, created_to)
-    return {"runs": run_store.list_runs(db, limit, before_id, filt, offset), "total": run_store.count_runs(db, filt)}
+    # Daftar = ringkasan yang sama untuk semua peran (allowlist): opsi teknis & error mentah ada di detail (blok tech).
+    return {"runs": [simple_view.run_summary(r) for r in run_store.list_runs(db, limit, before_id, filt, offset)],
+            "total": run_store.count_runs(db, filt)}
 
 
 def _get_run_or_404(db: sqlite3.Connection, run_id: int) -> dict:
@@ -136,14 +140,34 @@ def _get_run_or_404(db: sqlite3.Connection, run_id: int) -> dict:
     return run
 
 
+_ITEM_TECH = ("job_name", "template", "size_bytes", "location", "s3_key", "error", "dq_detail", "source_rows")
+
+
 @router.get("/{run_id}")
-def get_run(run_id: int, _user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
-    return _get_run_or_404(db, run_id)
+def get_run(run_id: int, user: dict = Depends(current_user), db: sqlite3.Connection = Depends(get_db)):
+    """
+    Satu bentuk respons: ringkasan + item sederhana (nama tampilan) untuk semua peran; blok `tech` (opsi, error, key S3, rincian
+    pemeriksaan) hanya operator/admin. `args` (snapshot definisi job, memuat query) tidak dikirim -- UI tidak memakainya.
+    """
+    run = _get_run_or_404(db, run_id)
+    labels = {r.name: r.label for r in load_job_rows(enabled_only=False)}
+    viewer = is_viewer(user)
+    items = []
+    for i in run["items"]:
+        item = simple_view.run_item(i, labels)
+        if not viewer:
+            item["tech"] = {k: i.get(k) for k in _ITEM_TECH}
+        items.append(item)
+    out = simple_view.run_summary(run) | {"items": items}
+    if not viewer:
+        out["tech"] = {"options": run["options"], "error": run["error"], "s3_bucket": S3_BUCKET_NAME}
+    return out
 
 
 @router.get("/{run_id}/log")
-def get_log(run_id: int, offset: int = Query(0, ge=0), _user: dict = Depends(current_user),
+def get_log(run_id: int, offset: int = Query(0, ge=0), _user: dict = Depends(require_role("operator")),
             db: sqlite3.Connection = Depends(get_db)):
+    """Log teknis run -- hanya operator/admin (Viewer: ringkasan & status per data di detail)."""
     row = db.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Run #{run_id} tidak ditemukan.")

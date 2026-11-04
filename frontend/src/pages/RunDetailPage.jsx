@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
-import { ArrowLeft, Ban, Check, Copy, RotateCcw, Terminal } from 'lucide-react'
+import { ArrowLeft, Ban, Check, Copy, RotateCcw } from 'lucide-react'
 import { api } from '../lib/api'
 import { hasRole, useAuth } from '../lib/auth'
 import { useApi } from '../lib/hooks'
 import { fmtBytes, fmtDate, fmtDateRange, fmtDateTime, fmtDuration, fmtNumber, runElapsed, fmtCreator } from '../lib/format'
 import {
-  ACTIVE_STATUSES, Alert, Button, Card, DqBadge, FINAL_STATUSES, LoadingBlock, Modal, ProgressBar, Stat, StatusBadge,
+  ACTIVE_STATUSES, Alert, Button, Card, DqBadge, FINAL_STATUSES, LoadingBlock, Modal, ProgressBar, Stat, StatusBadge, TechDetails,
 } from '../components/ui'
+
+// SATU tampilan untuk semua peran: ringkasan + rincian per data (nama tampilan) dari bagian sederhana respons. "Detail teknis"
+// (opsi proses, identifier job, error, key S3, rincian pemeriksaan, log) muncul bila server mengirim `tech` -- Operator/Admin.
 
 const MAX_LOG_CHARS = 400_000
 
+/** Log teknis run (hanya dimuat saat bagian "Detail teknis · Log" dibuka). */
 function LogPanel({ runId, finished }) {
   const [text, setText] = useState('')
   const [follow, setFollow] = useState(true)
@@ -54,16 +58,11 @@ function LogPanel({ runId, finished }) {
   }
 
   return (
-    <Card className="overflow-hidden">
-      <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-          <Terminal className="h-4 w-4 text-gray-400" aria-hidden /> Log
-          {!finished && <span className="text-xs font-normal text-gray-500">· live</span>}
-        </h2>
+    <div className="overflow-hidden rounded-lg border border-gray-200">
+      <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2 text-xs text-gray-500">
+        <span>{finished ? 'Log lengkap' : 'Log live'}</span>
         {!follow && (
-          <button type="button" onClick={() => setFollow(true)} className="text-xs font-medium text-brand-600 hover:underline">
-            Ikuti log terbaru ↓
-          </button>
+          <button type="button" onClick={() => setFollow(true)} className="font-medium text-brand-600 hover:underline">Ikuti log terbaru ↓</button>
         )}
       </div>
       <pre
@@ -71,9 +70,9 @@ function LogPanel({ runId, finished }) {
         onScroll={onScroll}
         className="h-96 overflow-auto bg-gray-900 px-4 py-3 font-mono text-[12.5px] leading-relaxed whitespace-pre-wrap break-all text-gray-300"
       >
-        {text || (finished ? 'Log tidak tersedia.' : 'Menunggu worker memulai run…')}
+        {text || (finished ? 'Log tidak tersedia.' : 'Menunggu worker memulai proses…')}
       </pre>
-    </Card>
+    </div>
   )
 }
 
@@ -98,59 +97,56 @@ function CopyButton({ value }) {
   )
 }
 
-function Destination({ item, bucket }) {
-  if (item.s3_key) {
-    const uri = `s3://${bucket || '<bucket>'}/${item.s3_key}`
+function Destination({ tech, bucket }) {
+  if (tech.s3_key) {
+    const uri = `s3://${bucket || '<bucket>'}/${tech.s3_key}`
     return (
       <span className="flex items-center gap-1">
-        <span className="truncate font-mono text-xs text-gray-600" title={uri}>{item.s3_key}</span>
+        <span className="truncate font-mono text-xs text-gray-600" title={uri}>{tech.s3_key}</span>
         <CopyButton value={uri} />
       </span>
     )
   }
-  if (item.location) return <span className="truncate font-mono text-xs text-gray-500" title={item.location}>{item.location}</span>
+  if (tech.location) return <span className="truncate font-mono text-xs text-gray-500" title={tech.location}>{tech.location}</span>
   return <span className="text-gray-400">–</span>
 }
 
-// Data quality item (pipeline/dq.py). Ditahan: alasannya sudah tampil sebagai error item; peringatan
-// ditulis di bawah badge; rincian semua pemeriksaan ada di tooltip.
-function DqCell({ item }) {
-  if (!item.dq_status) return <span className="text-gray-400">–</span>
-  const checks = item.dq_detail || []
-  const title = [
-    ...checks.map((c) => `${c.name}: ${c.message}`),
-    ...(item.source_rows != null ? [`baris di sumber: ${fmtNumber(item.source_rows)}`] : []),
-  ].join('\n')
+/** Rincian pemeriksaan kualitas (pipeline/dq.py) satu item -- hanya di "Detail teknis". */
+function DqChecks({ tech }) {
+  const checks = tech.dq_detail || []
+  if (!checks.length && tech.source_rows == null) return <span className="text-gray-400">–</span>
   return (
-    <div className="space-y-1" title={title}>
-      <DqBadge status={item.dq_status} />
-      {checks.filter((c) => c.status === 'warning').map((c) => (
-        <p key={c.name} className="max-w-xs break-words text-xs text-amber-700">{c.message}</p>
+    <ul className="space-y-0.5 text-xs">
+      {checks.map((c, k) => (
+        <li key={k} className={c.status === 'ok' ? 'text-gray-500' : c.status === 'warning' ? 'text-amber-700' : 'text-red-600'}>
+          <span className="font-medium">{c.name}</span>: {c.message}
+        </li>
       ))}
-    </div>
+      {tech.source_rows != null && <li className="text-gray-500">baris di sumber: {fmtNumber(tech.source_rows)}</li>}
+    </ul>
   )
 }
 
 const ITEM_FILTERS = [
   ['all', 'Semua'],
   ['failed', 'Gagal'],
-  ['success', 'Sukses'],
+  ['success', 'Berhasil'],
   ['running', 'Berjalan'],
   ['pending', 'Menunggu'],
   ['other', 'Lainnya'],
 ]
+const MAIN = ['failed', 'success', 'running', 'pending']
 
 export default function RunDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
-  // Dari Riwayat Run yang sedang difilter -> kembali ke daftar dengan filter yang sama.
+  // Dari Riwayat Proses yang sedang difilter -> kembali ke daftar dengan filter yang sama.
   const backTo = location.state?.back || '/runs'
   const { user } = useAuth()
   const { data: run, error, loading, reload } = useApi(`/runs/${id}`, {
     refreshMs: (r) => (r && !FINAL_STATUSES.includes(r.status) ? 2500 : null),
   })
-  const { data: meta } = useApi('/runs/meta')
   const [filter, setFilter] = useState('all')
   const [confirm, setConfirm] = useState(null) // 'cancel' | 'retry'
   const [busy, setBusy] = useState(false)
@@ -161,28 +157,28 @@ export default function RunDetailPage() {
     const c = { all: items.length, other: 0 }
     for (const i of items) {
       c[i.status] = (c[i.status] || 0) + 1
-      if (!['failed', 'success', 'running', 'pending'].includes(i.status)) c.other += 1
+      if (!MAIN.includes(i.status)) c.other += 1
     }
     return c
   }, [items])
-  const shown = items.filter((i) =>
-    filter === 'all' ? true : filter === 'other' ? !['failed', 'success', 'running', 'pending'].includes(i.status) : i.status === filter)
+  const shown = items.filter((i) => (filter === 'all' ? true : filter === 'other' ? !MAIN.includes(i.status) : i.status === filter))
 
   if (loading && !run) return <LoadingBlock />
   if (error && !run) {
     return (
       <div className="space-y-4">
-        <Alert tone="error">{error.message}</Alert>
+        <Alert tone="error">{error.status === 404 ? `Proses No. ${id} tidak ditemukan.` : error.message}</Alert>
         <Link to={backTo} className="text-sm font-medium text-brand-600 hover:underline">← Kembali ke riwayat</Link>
       </div>
     )
   }
 
+  const tech = run.tech // hanya Operator/Admin
   const isOperator = hasRole(user, 'operator')
   const canCancel = isOperator && ACTIVE_STATUSES.includes(run.status) && !run.cancel_requested
   const canRetry = isOperator && FINAL_STATUSES.includes(run.status) && run.ok_items < run.total_items
   const finished = FINAL_STATUSES.includes(run.status)
-  const o = run.options
+  const o = tech?.options
 
   const doAction = async () => {
     setBusy(true)
@@ -207,15 +203,15 @@ export default function RunDetailPage() {
     <div className="space-y-6">
       <div>
         <Link to={backTo} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800">
-          <ArrowLeft className="h-4 w-4" aria-hidden /> Riwayat Run
+          <ArrowLeft className="h-4 w-4" aria-hidden /> Riwayat Proses
         </Link>
         <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-semibold tracking-tight text-gray-800">Run #{run.id}</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-800">Proses No. {run.id}</h1>
             <StatusBadge status={run.status} />
             {run.retry_of && (
               <Link to={`/runs/${run.retry_of}`} state={location.state} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-brand-600">
-                <RotateCcw className="h-3.5 w-3.5" aria-hidden /> ulangan dari #{run.retry_of}
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden /> ulangan dari No. {run.retry_of}
               </Link>
             )}
           </div>
@@ -227,38 +223,44 @@ export default function RunDetailPage() {
       </div>
 
       {run.cancel_requested && run.status === 'running' && (
-        <Alert tone="warning" title="Pembatalan diminta">Worker akan berhenti setelah job yang sedang berjalan selesai.</Alert>
+        <Alert tone="warning" title="Pembatalan diminta">Data yang sedang diproses diselesaikan dulu; sisanya tidak dijalankan.</Alert>
       )}
-      {run.error && <Alert tone="error" title="Run berhenti karena error">{run.error}</Alert>}
+      {run.has_error && (
+        <Alert tone="error" title="Proses berhenti karena kendala">
+          {tech?.error || `Hubungi operator dengan menyebut Proses No. ${run.id}.`}
+        </Alert>
+      )}
 
-      <Card className="p-5">
-        <div className="grid grid-cols-2 gap-x-6 gap-y-5 lg:grid-cols-5">
+      <Card className="overflow-hidden">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-5 p-5 lg:grid-cols-5">
           <div className="col-span-2 lg:col-span-1">
             <p className="text-xs font-medium text-gray-500">Progres</p>
             <div className="mt-2.5"><ProgressBar value={run.done_items} total={run.total_items} status={run.status} /></div>
-            <p className="mt-1 text-xs text-gray-500">{run.ok_items} sukses · {run.failed_items} gagal</p>
+            <p className="mt-1 text-xs text-gray-500">{run.ok_items} berhasil · {run.failed_items} gagal</p>
           </div>
-          <Stat label="Tanggal data" value={fmtDateRange(run.start_date, run.end_date)} sub={`${run.job_count} job`} />
+          <Stat label="Tanggal data" value={fmtDateRange(run.start_date, run.end_date)} sub={`${run.job_count} data`} />
           <Stat label="Total baris" value={fmtNumber(run.total_rows)} />
           <Stat label="Durasi" value={fmtDuration(runElapsed(run))} sub={run.started_at ? `mulai ${fmtDateTime(run.started_at)}` : 'belum mulai'} />
           <Stat label="Dibuat oleh" value={fmtCreator(run.created_by)} sub={fmtDateTime(run.created_at)} />
         </div>
-        <div className="mt-5 flex flex-wrap gap-2 border-t border-gray-100 pt-4 text-xs">
-          {[
-            o.skip_s3 ? 'Upload S3: tidak' : 'Upload S3: ya',
-            o.skip_local ? 'Simpan lokal: tidak' : 'Simpan lokal: ya',
-            `Kompresi: ${o.compression}`,
-            `Batch: ${fmtNumber(o.batch)}`,
-            o.stop_on_error ? 'Berhenti saat gagal' : 'Lanjut saat gagal',
-          ].map((t) => (
-            <span key={t} className="rounded-md bg-gray-100 px-2 py-1 text-gray-600">{t}</span>
-          ))}
-        </div>
+        {o && (
+          <TechDetails storageKey="run-options" summary="opsi proses: upload S3, simpan lokal, kompresi, batch">
+            <div className="flex flex-wrap gap-2 text-xs">
+              {[
+                o.skip_s3 ? 'Upload S3: tidak' : 'Upload S3: ya',
+                o.skip_local ? 'Simpan lokal: tidak' : 'Simpan lokal: ya',
+                `Kompresi: ${o.compression}`,
+                `Batch: ${fmtNumber(o.batch)}`,
+                o.stop_on_error ? 'Berhenti saat gagal' : 'Lanjut saat gagal',
+              ].map((t) => <span key={t} className="rounded-md bg-gray-100 px-2 py-1 text-gray-600">{t}</span>)}
+            </div>
+          </TechDetails>
+        )}
       </Card>
 
       <Card className="overflow-hidden">
         <div className="flex flex-col gap-3 border-b border-gray-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-sm font-semibold text-gray-800">Rincian eksekusi</h2>
+          <h2 className="text-sm font-semibold text-gray-800">Rincian per data</h2>
           <div className="-mx-1 flex gap-1 overflow-x-auto px-1" role="tablist">
             {ITEM_FILTERS.filter(([k]) => k === 'all' || counts[k]).map(([k, label]) => (
               <button
@@ -268,9 +270,7 @@ export default function RunDetailPage() {
                 aria-selected={filter === k}
                 onClick={() => setFilter(k)}
                 className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                  filter === k
-                    ? 'bg-brand-600 text-white shadow-sm'
-                    : 'text-gray-600 hover:bg-gray-100'
+                  filter === k ? 'bg-brand-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-100'
                 }`}
               >
                 {label} <span className="tabular-nums opacity-70">{counts[k]}</span>
@@ -283,18 +283,16 @@ export default function RunDetailPage() {
           {shown.map((i) => (
             <li key={i.id} className="space-y-1.5 px-4 py-3">
               <div className="flex items-center justify-between gap-3">
-                <span className="truncate font-medium text-gray-800">{i.job_name}</span>
+                <span className="truncate font-medium text-gray-800">{i.label}</span>
                 <StatusBadge status={i.status} />
               </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-gray-500">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums text-gray-500">
                 <span>{fmtDate(i.target_date)}</span>
                 <span>{fmtNumber(i.rows)} baris</span>
-                <span>{fmtBytes(i.size_bytes)}</span>
                 <span>{fmtDuration(i.elapsed_s)}</span>
+                {i.dq_status && <DqBadge status={i.dq_status} />}
               </div>
-              {i.dq_status && <DqCell item={i} />}
-              {i.error && <p className="break-words font-mono text-xs text-red-600">{i.error}</p>}
-              {(i.s3_key || i.location) && <Destination item={i} bucket={meta?.s3_bucket} />}
+              {i.has_error && <p className="text-xs text-red-600">Ada kendala saat diproses.</p>}
             </li>
           ))}
         </ul>
@@ -302,46 +300,74 @@ export default function RunDetailPage() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50/80 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                <th className="px-4 py-2.5">#</th>
-                <th className="px-4 py-2.5">Job</th>
+                <th className="px-4 py-2.5">Data</th>
                 <th className="px-4 py-2.5">Tanggal</th>
                 <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5">DQ</th>
+                <th className="px-4 py-2.5">Pemeriksaan kualitas</th>
                 <th className="px-4 py-2.5 text-right">Baris</th>
-                <th className="px-4 py-2.5 text-right">Ukuran</th>
                 <th className="px-4 py-2.5 text-right">Durasi</th>
-                <th className="px-4 py-2.5">Tujuan</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {shown.map((i) => (
                 <tr key={i.id} className="align-top">
-                  <td className="px-4 py-2.5 tabular-nums text-gray-400">{i.seq}</td>
                   <td className="px-4 py-2.5">
-                    <p className="font-medium text-gray-800">{i.job_name}</p>
-                    {i.error && <p className="mt-1 max-w-xl break-words font-mono text-xs text-red-600">{i.error}</p>}
+                    <p className="font-medium text-gray-800">{i.label}</p>
+                    {i.has_error && <p className="mt-0.5 text-xs text-red-600">Ada kendala saat diproses.</p>}
                   </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-gray-600">{fmtDate(i.target_date)}</td>
                   <td className="px-4 py-2.5"><StatusBadge status={i.status} /></td>
-                  <td className="px-4 py-2.5"><DqCell item={i} /></td>
+                  <td className="px-4 py-2.5">{i.dq_status ? <DqBadge status={i.dq_status} /> : <span className="text-gray-400">–</span>}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtNumber(i.rows)}</td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtBytes(i.size_bytes)}</td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-gray-600">{fmtDuration(i.elapsed_s)}</td>
-                  <td className="max-w-xs px-4 py-2.5"><Destination item={i} bucket={meta?.s3_bucket} /></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {tech && (
+          <TechDetails storageKey="run-items" summary="identifier job, error, pemeriksaan kualitas, ukuran, key S3 (mengikuti filter di atas)">
+            <div className="overflow-x-auto rounded-lg border border-gray-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 text-left text-xs font-medium text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2">#</th>
+                    <th className="px-3 py-2">Job · error</th>
+                    <th className="px-3 py-2">Pemeriksaan</th>
+                    <th className="px-3 py-2 text-right">Ukuran</th>
+                    <th className="px-3 py-2">Tujuan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {shown.map((i) => (
+                    <tr key={i.id} className="align-top">
+                      <td className="px-3 py-2 tabular-nums text-gray-400">{i.seq}</td>
+                      <td className="px-3 py-2">
+                        <p className="font-mono text-xs text-gray-800">{i.tech.job_name}</p>
+                        {i.tech.error && <p className="mt-1 max-w-xl break-words font-mono text-xs text-red-600">{i.tech.error}</p>}
+                      </td>
+                      <td className="max-w-sm px-3 py-2"><DqChecks tech={i.tech} /></td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-gray-600">{fmtBytes(i.tech.size_bytes)}</td>
+                      <td className="max-w-xs px-3 py-2"><Destination tech={i.tech} bucket={tech.s3_bucket} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </TechDetails>
+        )}
+        {tech && (
+          <TechDetails storageKey="run-log" title="Detail teknis · Log" summary={finished ? 'keluaran worker' : 'keluaran worker (live)'}>
+            <LogPanel runId={run.id} finished={finished} />
+          </TechDetails>
+        )}
       </Card>
-
-      <LogPanel runId={run.id} finished={finished} />
 
       <Modal
         open={!!confirm}
         onClose={() => !busy && setConfirm(null)}
         size="md"
-        title={confirm === 'cancel' ? `Batalkan run #${run.id}?` : `Ulangi run #${run.id}?`}
+        title={confirm === 'cancel' ? `Batalkan proses No. ${run.id}?` : `Ulangi proses No. ${run.id}?`}
         footer={
           <>
             <Button variant="secondary" onClick={() => setConfirm(null)} disabled={busy}>Tidak</Button>
@@ -355,13 +381,13 @@ export default function RunDetailPage() {
         {confirm === 'cancel' ? (
           <p className="text-sm text-gray-600">
             {run.status === 'queued'
-              ? 'Run belum mulai dan akan langsung dibatalkan.'
-              : 'Job yang sedang berjalan tetap diselesaikan (query tidak bisa dihentikan di tengah jalan); sisa job tidak dijalankan.'}
+              ? 'Proses belum mulai dan akan langsung dibatalkan.'
+              : 'Data yang sedang diproses tetap diselesaikan (query tidak bisa dihentikan di tengah jalan); sisa data tidak dijalankan.'}
           </p>
         ) : (
           <p className="text-sm text-gray-600">
-            Run baru dibuat untuk <strong>{run.total_items - run.ok_items}</strong> eksekusi yang belum berhasil, memakai definisi job
-            <strong> terbaru</strong> dan opsi yang sama. Partisi S3 terkait akan ditimpa.
+            Proses baru dibuat untuk <strong>{run.total_items - run.ok_items}</strong> data yang belum berhasil, memakai definisi
+            <strong> terbaru</strong> dan opsi yang sama. Data di datalake untuk tanggal terkait akan ditimpa.
           </p>
         )}
       </Modal>

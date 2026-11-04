@@ -7,7 +7,7 @@ import { useApi, useDebounced } from '../lib/hooks'
 import { fmtDate, fmtNumber } from '../lib/format'
 import {
   ADVANCED_TEMPLATES, CADENCE_LABEL, DAILY_TEMPLATES, PERIOD_ENCODINGS, PERIOD_MODES, RESET_PERIOD_ARGS, bronzeMode, periodEncoding, pickArgs,
-  suggestDataset, suggestModule, suggestName, suggestPeriodColumns,
+  suggestDataset, suggestModule, suggestName, suggestPeriodColumns, withTech,
 } from '../lib/jobs'
 import { Alert, Badge, Button, Card, Field, LoadingBlock, Spinner, Toggle, inputClass } from '../components/ui'
 import { ColumnSelect, DbSelect, Err, TablePicker } from '../components/schema'
@@ -15,7 +15,7 @@ import { ColumnSelect, DbSelect, Err, TablePicker } from '../components/schema'
 const selectClass = `${inputClass} pr-8`
 const enc = encodeURIComponent
 // Error yang tidak menghalangi uji coba (baru berlaku saat simpan) -- sama dengan backend /test-run.
-const NON_BLOCKING_FOR_TEST = ['name', 's3', 'output', 'dataset']
+const NON_BLOCKING_FOR_TEST = ['name', 's3', 'output', 'dataset', 'display_name']
 
 function clean(obj) {
   const out = {}
@@ -233,9 +233,10 @@ export default function JobFormPage() {
   const { data: meta } = useApi('/jobs/templates')
   const { data: runMeta } = useApi('/runs/meta')
   const { data: jobsData } = useApi('/jobs')
-  const { data: existing, error: loadError } = useApi(isEdit ? `/jobs/${enc(editName)}` : null)
+  const { data: existingRaw, error: loadError } = useApi(isEdit ? `/jobs/${enc(editName)}` : null)
+  const existing = useMemo(() => withTech(existingRaw), [existingRaw])
 
-  const [draft, setDraft] = useState(isEdit ? null : { name: '', template: 'bronze_daily', args: {}, notes: '', cadence: '' })
+  const [draft, setDraft] = useState(isEdit ? null : { name: '', display_name: '', template: 'bronze_daily', args: {}, notes: '', cadence: '' })
   const [touched, setTouched] = useState({})
   const [attempted, setAttempted] = useState(false)
   const [detect, setDetect] = useState(null)
@@ -255,7 +256,7 @@ export default function JobFormPage() {
   // Edit: isi form dari job yang ada (sekali).
   useEffect(() => {
     if (isEdit && existing && !draft) {
-      setDraft({ name: existing.name, template: existing.template, args: existing.args, notes: existing.notes || '', cadence: existing.cadence || '' })
+      setDraft({ name: existing.name, display_name: existing.display_name || '', template: existing.template, args: existing.args, notes: existing.notes || '', cadence: existing.cadence || '' })
     }
   }, [isEdit, existing, draft])
   useEffect(() => {
@@ -268,7 +269,7 @@ export default function JobFormPage() {
   const isAdvanced = ADVANCED_TEMPLATES.includes(tpl)
   const errors = validation?.errors || {}
   const preview = validation?.preview
-  const modules = useMemo(() => [...new Set((jobsData?.jobs || []).map((j) => j.s3?.module).filter(Boolean))].sort(), [jobsData])
+  const modules = useMemo(() => [...new Set((jobsData?.jobs || []).map((j) => withTech(j).s3?.module).filter(Boolean))].sort(), [jobsData])
   const templateLabel = (k) => meta?.templates.find((t) => t.key === k)?.label || k
 
   const setArgs = (patch) => setDraft((d) => ({ ...d, args: clean({ ...d.args, ...patch }) }))
@@ -300,7 +301,7 @@ export default function JobFormPage() {
 
   // Validasi live (debounce)
   const payload = useMemo(() => (draft ? {
-    name: draft.name, template: draft.template, args: draft.args, cadence: draft.cadence || null,
+    name: draft.name, display_name: draft.display_name, template: draft.template, args: draft.args, cadence: draft.cadence || null,
     original_name: isEdit ? editName : null, confirm_s3_move: confirmMove,
   } : null), [draft, isEdit, editName, confirmMove])
   const debounced = useDebounced(payload, 450)
@@ -478,10 +479,10 @@ export default function JobFormPage() {
     setSaveError(null)
     try {
       if (isEdit) {
-        await api(`/jobs/${enc(editName)}`, { method: 'PUT', body: { template: tpl, args, notes: draft.notes, cadence: draft.cadence || null, confirm_s3_move: confirmMove } })
+        await api(`/jobs/${enc(editName)}`, { method: 'PUT', body: { template: tpl, args, notes: draft.notes, display_name: draft.display_name, cadence: draft.cadence || null, confirm_s3_move: confirmMove } })
         navigate(`/jobs/${enc(editName)}`)
       } else {
-        await api('/jobs', { method: 'POST', body: { name: draft.name, template: tpl, args, notes: draft.notes, cadence: draft.cadence || null, enabled: enableNow && !!testedOk } })
+        await api('/jobs', { method: 'POST', body: { name: draft.name, display_name: draft.display_name, template: tpl, args, notes: draft.notes, cadence: draft.cadence || null, enabled: enableNow && !!testedOk } })
         navigate(`/jobs/${enc(draft.name)}`)
       }
     } catch (e) {
@@ -790,6 +791,9 @@ export default function JobFormPage() {
               <TextInput id="name" label="Nama job" value={draft.name} disabled={isEdit} error={isEdit ? null : fieldError('name')}
                 hint={isEdit ? 'Nama tidak bisa diubah (dipakai riwayat run & --only).' : 'Huruf kecil, angka, underscore. Awalan bronze_ = ikut jadwal CLI.'}
                 onChange={(v) => { touch('name'); setDraft((d) => ({ ...d, name: v.trim() })) }} />
+              <TextInput id="display_name" label="Nama tampilan" mono={false} value={draft.display_name} error={errors.display_name || null}
+                hint={`Nama yang mudah dibaca semua pengguna, mis. "Transaksi panen (HMS)". Kosong = otomatis${validation?.auto_label ? `: ${validation.auto_label}` : ''}.`}
+                onChange={(v) => setDraft((d) => ({ ...d, display_name: v }))} />
               <TextInput id="output" label="File output lokal" value={args.output} error={fieldError('output')}
                 hint={!isAdvanced ? 'Untuk job bronze, juga dipakai sebagai nama file di S3.' : undefined}
                 onChange={(v) => { touch('output'); setArgs({ output: v }) }} />
